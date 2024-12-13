@@ -6,10 +6,14 @@
     <RootNamespace>energy_graphs</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <UserSecretsId>fdb22bd8-b2ad-4621-8acb-64f357eee2ee</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="ImpSoft.OctopusEnergy.Api" Version="3.0.1" />
+    <PackageReference Include="ImpSoft.OctopusEnergy.Api" Version="4.0.0-pre.10" />
+    <PackageReference Include="Microsoft.Extensions.Configuration" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="8.0.0" />
   </ItemGroup>
 
 </Project>
