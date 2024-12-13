@@ -8,16 +8,15 @@ dotnet user-secrets set electricity_mpan <electric meter MPAN>
 dotnet user-secrets set electricity_serial <electric meter serial number>
 dotnet user-secrets set gas_mprn <gas meter MPRN>
 dotnet user-secrets set gas_serial <gas meter serial number>
+
+dotnet user-secrets set visualcrossing_key <VisualCrossing.com API key>
 ```
 
-Get these from https://octopus.energy/dashboard/new/accounts/personal-details/api-access
+Get Octopus values from https://octopus.energy/dashboard/new/accounts/personal-details/api-access
+
+Get weather API key from visualcrossing.com
 
 Note that this saves the secrets in a way that won't get included in this repository but they are not encryped and will remain on your disk and in your terminal history.
-
-Before running create your output folder:
-```
-mkdir output
-```
 
 To run:
 ```

@@ -290,3 +290,6 @@ __pycache__/
 
 # output graphs
 output/
+
+# cache folder
+cache/
