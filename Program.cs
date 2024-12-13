@@ -1,9 +1,5 @@
 ﻿using ImpSoft.OctopusEnergy.Api;
 using Microsoft.Extensions.Configuration;
-using System.Net.Http.Headers;
-using System.Text;
-// Get your api key, maybe from user secrets
-
 var config = new ConfigurationBuilder().AddUserSecrets<Program>().Build();
             
 var secretProvider = config.Providers.First();
@@ -15,7 +11,8 @@ secretProvider.TryGet("gas_mprn", out var gasMPRN);
 secretProvider.TryGet("gas_serial", out var gasSerial);
 
 using var httpClient = new HttpClient();
-httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(apiKey + ":")));
+
+httpClient.SetAuthenticationHeaderFromApiKey(apiKey);
 
 // Create the api wrapper
 var octopusClient = new OctopusEnergyClient(httpClient);
