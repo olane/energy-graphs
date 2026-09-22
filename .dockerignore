@@ -1,0 +1,6 @@
+bin/
+obj/
+output/
+.git/
+.gitignore
+Dockerfile

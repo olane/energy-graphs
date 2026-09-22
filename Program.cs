@@ -3,19 +3,26 @@ using System.Text.Json;
 using CommunityToolkit.Diagnostics;
 using ImpSoft.OctopusEnergy.Api;
 using Microsoft.Extensions.Configuration;
-var config = new ConfigurationBuilder().AddUserSecrets<Program>().Build();
+var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+{
+    Args = args,
+    WebRootPath = "output"
+});
+builder.Configuration.AddUserSecrets<Program>();
 
-var secretProvider = config.Providers.First();
+var config = builder.Configuration;
 
-secretProvider.TryGet("octopus_api_key", out var apiKey);
-secretProvider.TryGet("electricity_mpan", out var electricityMPAN);
-secretProvider.TryGet("electricity_serial", out var electricitySerial);
-secretProvider.TryGet("gas_mprn", out var gasMPRN);
-secretProvider.TryGet("gas_serial", out var gasSerial);
+var apiKey = config["octopus_api_key"];
+var electricityMPAN = config["electricity_mpan"];
+var electricitySerial = config["electricity_serial"];
+var gasMPRN = config["gas_mprn"];
+var gasSerial = config["gas_serial"];
 
-secretProvider.TryGet("visualcrossing_key", out var visualCrossingKey);
+var visualCrossingKey = config["visualcrossing_key"];
 
 var weatherLoc = "Cambridge%20UK";
+
+var cacheDir = config["cache_dir"] ?? "cache";
 
 using var httpClient = new HttpClient();
 
@@ -42,6 +49,39 @@ var tempDict = weather.ToDictionary(x => x.DateTime, x => x.Temp);
 DrawGasTempScatterChart(gasConsumption, tempDict);
 DrawGasTempScatterChartWithSplit(gasConsumption, tempDict, new DateTime(2024, 12, 01));
 DrawGasPlusElectricityTempScatterChart(gasConsumption, electricConsumption, tempDict);
+WriteIndexHtml();
+
+var app = builder.Build();
+app.UseDefaultFiles();
+app.UseStaticFiles();
+app.Run();
+
+void WriteIndexHtml()
+{
+    File.WriteAllText("output/index.html", """
+        <!doctype html>
+        <html lang="en">
+        <head>
+        <meta charset="utf-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Energy Graphs</title>
+        <style>
+        body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 1200px; padding: 1rem; }
+        img { max-width: 100%; height: auto; }
+        figure { margin: 0 0 2rem; }
+        </style>
+        </head>
+        <body>
+        <h1>Energy usage</h1>
+        <figure><img src="gas-usage.png" alt="Gas usage"></figure>
+        <figure><img src="electric-usage.png" alt="Electricity usage"></figure>
+        <figure><img src="gas-temp-scatter.png" alt="Gas usage vs temperature"></figure>
+        <figure><img src="gas-temp-scatter-split.png" alt="Gas usage vs temperature (split)"></figure>
+        <figure><img src="total-energy-temp-scatter.png" alt="Total energy usage vs temperature"></figure>
+        </body>
+        </html>
+        """);
+}
 
 void DrawGasTempScatterChart(List<Consumption> gasConsumption, Dictionary<string, decimal> tempDict)
 {
@@ -157,7 +197,7 @@ async Task<List<WeatherDay>> GetWeather(string vcApiKey, HttpClient client, stri
     string body;
 
     var hash = CreateMD5(uri);
-    var cacheFileName = $"cache/{hash}";
+    var cacheFileName = Path.Combine(cacheDir, hash);
     if(File.Exists(cacheFileName)) {
         body = File.ReadAllText(cacheFileName);
     }
@@ -169,7 +209,7 @@ async Task<List<WeatherDay>> GetWeather(string vcApiKey, HttpClient client, stri
         body = await response.Content.ReadAsStringAsync();
         response.EnsureSuccessStatusCode(); 
         
-        Directory.CreateDirectory("cache");
+        Directory.CreateDirectory(cacheDir);
         File.WriteAllText(cacheFileName, body);
     }
     
