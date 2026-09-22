@@ -45,6 +45,20 @@ Then open http://localhost:8080.
 
 Each environment variable is an alternative to the matching `dotnet user-secrets` entry above.
 
+### Prebuilt image
+
+CI publishes images to GitHub Container Registry on pushes to `main` and on `v*` tags:
+
+```
+docker run --rm -p 8080:8080 \
+  -v energy-graphs-cache:/app/cache \
+  -e octopus_api_key=<octopus api key> \
+  ... \
+  ghcr.io/olane/energy-graphs:latest
+```
+
+`main` pushes also publish the short commit SHA (`sha-<short>`) and the `main` tag; tags publish the semver version. GHCR packages are private by default, so to allow unauthenticated `docker pull` make the package public in the repository's package settings.
+
 ### Weather cache
 
 VisualCrossing calls are billed, so responses are cached as `cache/<md5-of-url>` and reused on later runs. The cache key includes the API key and the hard-coded date range, so it stays valid across restarts.
