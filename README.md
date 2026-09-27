@@ -83,9 +83,9 @@ docker run --rm -p 8080:8080 \
 
 ### Weather cache
 
-VisualCrossing calls are billed, so responses are cached as `cache/<md5-of-url>` and reused on later runs. The cache key includes the API key and the date range, so it stays valid as long as those don't change.
+VisualCrossing calls are billed, so weather is cached **per day** as `cache/<md5(location|date)>`. Each run only requests days that aren't cached yet — normally just the newly added day — so extending the range never re-fetches (and re-bills) the whole period. The key is the location and date, not the API key or the request range, so it stays valid as the window grows.
 
-The `-v energy-graphs-cache:/app/cache` mount above is important: without it, the cache lives in the container's writable layer and is lost on every container replacement, forcing a fresh (paid) API call. On first creation the named volume is seeded from whatever `cache/` directory exists at `docker build` time (the local one is copied in if present), and it is never overwritten by later rebuilds.
+The `-v energy-graphs-cache:/app/cache` mount above is important: without it, the cache lives in the container's writable layer and is lost on every container replacement, forcing fresh (paid) API calls. On first creation the named volume is seeded from whatever `cache/` directory exists at `docker build` time (the local one is copied in if present), and it is never overwritten by later rebuilds.
 
 To reuse your existing host cache directly instead, bind-mount it:
 

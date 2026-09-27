@@ -66,10 +66,9 @@ DrawElectricityUsage(electricConsumption);
 
 // Only fetch weather for days that actually have consumption data.
 var consumptionStarts = electricConsumption.Select(x => x.Start).Concat(gasConsumption.Select(x => x.Start)).ToList();
-var weatherFrom = consumptionStarts.Count > 0 ? consumptionStarts.Min().Date : from.Date;
-var weatherTo = consumptionStarts.Count > 0 ? consumptionStarts.Max().Date : to.Date;
-
-var weather = await GetWeather(visualCrossingKey, new HttpClient(), weatherLoc, weatherFrom, weatherTo);
+var weather = consumptionStarts.Count > 0
+    ? await GetWeather(visualCrossingKey, new HttpClient(), weatherLoc, consumptionStarts.Min().Date, consumptionStarts.Max().Date)
+    : new List<WeatherDay>();
 
 var tempDict = weather.ToDictionary(x => x.DateTime, x => x.Temp);
 DrawGasTempScatterChart(gasConsumption, tempDict);
@@ -304,35 +303,95 @@ void DrawElectricityUsage(List<Consumption> electricConsumption)
 
 
 async Task<List<WeatherDay>> GetWeather(string vcApiKey, HttpClient client, string weatherLocation, DateTime from, DateTime to) {
+    var days = new List<WeatherDay>();
+    var missingRuns = new List<(DateTime Start, DateTime End)>();
+
+    DateTime? runStart = null;
+    DateTime? runEnd = null;
+
+    // Cache is per day, so a new day only ever fetches that day.
+    for (var date = from.Date; date <= to.Date; date = date.AddDays(1)) {
+        if (TryReadCachedDay(weatherLocation, date, out var cached)) {
+            days.Add(cached!);
+            if (runStart is not null) {
+                missingRuns.Add((runStart.Value, runEnd!.Value));
+                runStart = runEnd = null;
+            }
+        }
+        else {
+            runStart ??= date;
+            runEnd = date;
+        }
+    }
+
+    if (runStart is not null) {
+        missingRuns.Add((runStart.Value, runEnd!.Value));
+    }
+
+    if (missingRuns.Count > 0) {
+        Directory.CreateDirectory(cacheDir);
+    }
+
+    foreach (var (start, end) in missingRuns) {
+        // Keep each request bounded; the per-day cache means each day is billed once.
+        for (var chunkStart = start; chunkStart <= end; chunkStart = chunkStart.AddDays(366)) {
+            var chunkEnd = chunkStart.AddDays(365);
+            if (chunkEnd > end) {
+                chunkEnd = end;
+            }
+
+            var fetched = await FetchWeatherRange(vcApiKey, client, weatherLocation, chunkStart, chunkEnd);
+            foreach (var day in fetched) {
+                WriteCachedDay(weatherLocation, day);
+                days.Add(day);
+            }
+        }
+    }
+
+    return days
+        .GroupBy(x => x.DateTime)
+        .Select(g => g.First())
+        .OrderBy(x => x.DateTime)
+        .ToList();
+}
+
+async Task<List<WeatherDay>> FetchWeatherRange(string vcApiKey, HttpClient client, string weatherLocation, DateTime from, DateTime to) {
     var fromString = from.ToString("yyyy-MM-dd");
     var toString = to.ToString("yyyy-MM-dd");
 
     var uri = $"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{weatherLocation}/{fromString}/{toString}?unitGroup=metric&key={vcApiKey}&contentType=json";
 
-    string body;
+    var response = await client.GetAsync(uri);
+    response.EnsureSuccessStatusCode();
 
-    var hash = CreateMD5(uri);
-    var cacheFileName = Path.Combine(cacheDir, hash);
-    if(File.Exists(cacheFileName)) {
-        body = File.ReadAllText(cacheFileName);
-    }
-    else {
-        //throw new Exception("");
-        var request = new HttpRequestMessage(HttpMethod.Get, uri);
-
-        var response = await client.SendAsync(request);
-        body = await response.Content.ReadAsStringAsync();
-        response.EnsureSuccessStatusCode(); 
-        
-        Directory.CreateDirectory(cacheDir);
-        File.WriteAllText(cacheFileName, body);
-    }
-    
-    WeatherResponse? weatherResponse = JsonSerializer.Deserialize<WeatherResponse>(body, new JsonSerializerOptions{
+    var body = await response.Content.ReadAsStringAsync();
+    var weatherResponse = JsonSerializer.Deserialize<WeatherResponse>(body, new JsonSerializerOptions{
         PropertyNameCaseInsensitive = true
     });
 
-    return weatherResponse.Days;
+    return weatherResponse?.Days ?? new List<WeatherDay>();
+}
+
+string WeatherCacheFile(string weatherLocation, DateTime date) =>
+    Path.Combine(cacheDir, CreateMD5($"{weatherLocation}|{date:yyyy-MM-dd}"));
+
+bool TryReadCachedDay(string weatherLocation, DateTime date, out WeatherDay? day) {
+    var cacheFileName = WeatherCacheFile(weatherLocation, date);
+    if (File.Exists(cacheFileName)) {
+        day = JsonSerializer.Deserialize<WeatherDay>(File.ReadAllText(cacheFileName), new JsonSerializerOptions{
+            PropertyNameCaseInsensitive = true
+        });
+        return day is not null;
+    }
+
+    day = null;
+    return false;
+}
+
+void WriteCachedDay(string weatherLocation, WeatherDay day) {
+    if (DateTime.TryParse(day.DateTime, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)) {
+        File.WriteAllText(WeatherCacheFile(weatherLocation, date), JsonSerializer.Serialize(day));
+    }
 }
 
 string CreateMD5(string input)
