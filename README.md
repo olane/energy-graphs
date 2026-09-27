@@ -56,16 +56,16 @@ If `octopus_account` is not set, the app falls back to the explicit `electricity
 
 ## Configuration
 
-The date range defaults to the last 12 months and can be overridden with settings/config (env vars or user-secrets):
+The date range defaults to **all time**: `from_date` comes from the discovered property's move-in date (falling back to open-ended when unknown), and `to_date` is today. Both can be overridden with settings/config (env vars or user-secrets):
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `from_date` | `to_date` minus 12 months | First day to fetch (`yyyy-MM-dd`) |
+| `from_date` | property move-in date (or open-ended) | First day to fetch (`yyyy-MM-dd`) |
 | `to_date` | today (UTC) | Last day to fetch (`yyyy-MM-dd`) |
 | `split_date` | unset | When set, draws `gas-temp-scatter-split.png` colouring data before/after this date; the chart is omitted when unset |
 | `cache_dir` | `cache` | Weather cache directory |
 
-Weather is fetched for the same `from_date`/`to_date` window. Usage graphs auto-scale their y-axis.
+Weather is fetched only for the days that actually have consumption data. Usage graphs auto-scale their y-axis.
 
 ### Prebuilt image
 

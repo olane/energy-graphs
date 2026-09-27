@@ -33,25 +33,27 @@ httpClient.SetAuthenticationHeaderFromApiKey(apiKey);
 // Create the api wrapper
 var octopusClient = new OctopusEnergyClient(httpClient);
 
-var toDate = ParseDate(config["to_date"], DateTime.UtcNow.Date);
-var fromDate = ParseDate(config["from_date"], toDate.AddMonths(-12));
-var from = new DateTimeOffset(fromDate, TimeSpan.Zero);
-var to = new DateTimeOffset(toDate.AddDays(1), TimeSpan.Zero).AddTicks(-1);
-
-var splitDate = TryParseDate(config["split_date"]);
-
 var electricityMeters = new List<(string Mpan, string Serial)>();
 var gasMeters = new List<(string Mprn, string Serial)>();
+DateTime? propertyMovedIn = null;
 
 if (!string.IsNullOrWhiteSpace(octopusAccount))
 {
-    (electricityMeters, gasMeters) = await DiscoverMeters(octopusAccount, httpClient);
+    (electricityMeters, gasMeters, propertyMovedIn) = await DiscoverMeters(octopusAccount, httpClient);
 }
 else
 {
     electricityMeters.Add((electricityMPAN!, electricitySerial!));
     gasMeters.Add((gasMPRN!, gasSerial!));
 }
+
+var toDate = ParseDate(config["to_date"], DateTime.UtcNow.Date);
+// Default to all time: from the property's move-in date when known, otherwise open-ended.
+var fromDate = TryParseDate(config["from_date"]) ?? propertyMovedIn ?? DateTime.UnixEpoch;
+var from = new DateTimeOffset(fromDate, TimeSpan.Zero);
+var to = new DateTimeOffset(toDate.AddDays(1), TimeSpan.Zero).AddTicks(-1);
+
+var splitDate = TryParseDate(config["split_date"]);
 
 var electricConsumption = await FetchConsumption(electricityMeters, (mpan, serial) => octopusClient.GetElectricityConsumptionAsync(mpan, serial, from, to, Interval.Day));
 
@@ -62,7 +64,12 @@ Directory.CreateDirectory("output");
 DrawGasUsage(gasConsumption);
 DrawElectricityUsage(electricConsumption);
 
-var weather = await GetWeather(visualCrossingKey, new HttpClient(), weatherLoc, from.Date, to.Date);
+// Only fetch weather for days that actually have consumption data.
+var consumptionStarts = electricConsumption.Select(x => x.Start).Concat(gasConsumption.Select(x => x.Start)).ToList();
+var weatherFrom = consumptionStarts.Count > 0 ? consumptionStarts.Min().Date : from.Date;
+var weatherTo = consumptionStarts.Count > 0 ? consumptionStarts.Max().Date : to.Date;
+
+var weather = await GetWeather(visualCrossingKey, new HttpClient(), weatherLoc, weatherFrom, weatherTo);
 
 var tempDict = weather.ToDictionary(x => x.DateTime, x => x.Temp);
 DrawGasTempScatterChart(gasConsumption, tempDict);
@@ -126,7 +133,7 @@ DateTimeOffset ParseInstant(string? value) =>
         ? parsed
         : DateTimeOffset.MinValue;
 
-async Task<(List<(string Mpan, string Serial)> Electricity, List<(string Mprn, string Serial)> Gas)> DiscoverMeters(string account, HttpClient client)
+async Task<(List<(string Mpan, string Serial)> Electricity, List<(string Mprn, string Serial)> Gas, DateTime? MovedIn)> DiscoverMeters(string account, HttpClient client)
 {
     var response = await client.GetAsync($"https://api.octopus.energy/v1/accounts/{account}/");
     response.EnsureSuccessStatusCode();
@@ -166,7 +173,9 @@ async Task<(List<(string Mpan, string Serial)> Electricity, List<(string Mprn, s
         .SelectMany(mp => mp.Meters.Select(m => (Mprn: mp.Mprn, Serial: m.SerialNumber)))
         .ToList();
 
-    return (electricity, gas);
+    var movedIn = ParseInstant(property.MovedInAt);
+
+    return (electricity, gas, movedIn == DateTimeOffset.MinValue ? null : movedIn.UtcDateTime.Date);
 }
 
 async Task<List<Consumption>> FetchConsumption(List<(string Id, string Serial)> meters, Func<string, string, Task<IEnumerable<Consumption>>> fetch)
