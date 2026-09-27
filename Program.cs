@@ -74,18 +74,29 @@ DrawElectricityUsage(electricConsumption);
 
 // Only fetch weather for days that actually have consumption data.
 var consumptionStarts = electricConsumption.Select(x => x.Start).Concat(gasConsumption.Select(x => x.Start)).ToList();
+
+// With no configured splits, colour by calendar year.
+if (splitDates.Count == 0 && consumptionStarts.Count > 0)
+{
+    var first = consumptionStarts.Min().Date;
+    var last = consumptionStarts.Max().Date;
+    splitDates = Enumerable.Range(first.Year + 1, Math.Max(0, last.Year - first.Year))
+        .Select(year => new DateTime(year, 1, 1))
+        .ToList();
+}
+
 var weather = consumptionStarts.Count > 0
     ? await GetWeather(visualCrossingKey, new HttpClient(), weatherLoc, consumptionStarts.Min().Date, consumptionStarts.Max().Date)
     : new List<WeatherDay>();
 
 var tempDict = weather.ToDictionary(x => x.DateTime, x => x.Temp);
 DrawGasTempScatterChart(gasConsumption, tempDict);
-if (splitDates.Count > 0)
+if (consumptionStarts.Count > 0)
 {
     DrawGasTempScatterChartWithPeriods(gasConsumption, tempDict, splitDates);
 }
 DrawGasPlusElectricityTempScatterChart(gasConsumption, electricConsumption, tempDict);
-WriteIndexHtml(splitDates.Count > 0);
+WriteIndexHtml(consumptionStarts.Count > 0);
 
 var app = builder.Build();
 app.UseDefaultFiles();
@@ -247,13 +258,14 @@ void DrawGasTempScatterChartWithPeriods(List<Consumption> gasConsumption, Dictio
     }
 
     ScottPlot.Plot gasPlot = new();
+    var firstYear = gasConsumption.Count > 0 ? gasConsumption.Min(x => x.Start.Year) : DateTime.UtcNow.Year;
     for (var i = 0; i < periodCount; i++) {
         if (xs[i].Count == 0) {
             continue;
         }
 
         var series = gasPlot.Add.ScatterPoints(xs[i], ys[i], ScottPlot.Color.FromColor(periodColors[i % periodColors.Length]));
-        series.LegendText = PeriodLabel(splitDates, i);
+        series.LegendText = PeriodLabel(splitDates, i, firstYear);
     }
 
     gasPlot.ShowLegend();
@@ -264,10 +276,12 @@ void DrawGasTempScatterChartWithPeriods(List<Consumption> gasConsumption, Dictio
     gasPlot.SavePng("output/gas-temp-scatter-split.png", 1000, 800);
 }
 
-string PeriodLabel(List<DateTime> splitDates, int period)
+string PeriodLabel(List<DateTime> splitDates, int period, int firstYear)
 {
-    if (splitDates.Count == 0) {
-        return "All time";
+    var yearly = splitDates.Count == 0 || splitDates.All(split => split.Month == 1 && split.Day == 1);
+
+    if (yearly) {
+        return (period == 0 ? firstYear : splitDates[period - 1].Year).ToString();
     }
 
     if (period == 0) {
