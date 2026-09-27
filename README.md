@@ -62,7 +62,7 @@ The date range defaults to **all time**: `from_date` comes from the discovered p
 | --- | --- | --- |
 | `from_date` | property move-in date (or open-ended) | First day to fetch (`yyyy-MM-dd`) |
 | `to_date` | today (UTC) | Last day to fetch (`yyyy-MM-dd`) |
-| `split_date` | unset | When set, draws `gas-temp-scatter-split.png` colouring data before/after this date; the chart is omitted when unset |
+| `split_dates` | one split per calendar year | Comma-separated `yyyy-MM-dd` split points for `gas-temp-scatter-split.png` (one colour per period, with a legend). When unset the periods default to calendar-year boundaries, so each year gets its own colour. `split_date` is accepted as an alias for a single split. |
 | `cache_dir` | `cache` | Weather cache directory |
 
 Weather is fetched only for the days that actually have consumption data. Usage graphs auto-scale their y-axis.
