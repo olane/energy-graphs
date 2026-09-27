@@ -45,6 +45,19 @@ Then open http://localhost:8080.
 
 Each environment variable is an alternative to the matching `dotnet user-secrets` entry above.
 
+## Configuration
+
+The date range defaults to the last 12 months and can be overridden with settings/config (env vars or user-secrets):
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `from_date` | `to_date` minus 12 months | First day to fetch (`yyyy-MM-dd`) |
+| `to_date` | today (UTC) | Last day to fetch (`yyyy-MM-dd`) |
+| `split_date` | unset | When set, draws `gas-temp-scatter-split.png` colouring data before/after this date; the chart is omitted when unset |
+| `cache_dir` | `cache` | Weather cache directory |
+
+Weather is fetched for the same `from_date`/`to_date` window. Usage graphs auto-scale their y-axis.
+
 ### Prebuilt image
 
 CI publishes images to GitHub Container Registry on pushes to `main` and on `v*` tags:
@@ -61,7 +74,7 @@ docker run --rm -p 8080:8080 \
 
 ### Weather cache
 
-VisualCrossing calls are billed, so responses are cached as `cache/<md5-of-url>` and reused on later runs. The cache key includes the API key and the hard-coded date range, so it stays valid across restarts.
+VisualCrossing calls are billed, so responses are cached as `cache/<md5-of-url>` and reused on later runs. The cache key includes the API key and the date range, so it stays valid as long as those don't change.
 
 The `-v energy-graphs-cache:/app/cache` mount above is important: without it, the cache lives in the container's writable layer and is lost on every container replacement, forcing a fresh (paid) API call. On first creation the named volume is seeded from whatever `cache/` directory exists at `docker build` time (the local one is copied in if present), and it is never overwritten by later rebuilds.
 

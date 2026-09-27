@@ -1,4 +1,5 @@
 ﻿using System.Drawing;
+using System.Globalization;
 using System.Text.Json;
 using CommunityToolkit.Diagnostics;
 using ImpSoft.OctopusEnergy.Api;
@@ -31,8 +32,12 @@ httpClient.SetAuthenticationHeaderFromApiKey(apiKey);
 // Create the api wrapper
 var octopusClient = new OctopusEnergyClient(httpClient);
 
-var from = new DateTimeOffset(2023, 09, 01, 00, 00, 00, TimeSpan.FromHours(0));
-var to = new DateTimeOffset(2024, 12, 13, 23, 59, 00, TimeSpan.FromHours(0));
+var toDate = ParseDate(config["to_date"], DateTime.UtcNow.Date);
+var fromDate = ParseDate(config["from_date"], toDate.AddMonths(-12));
+var from = new DateTimeOffset(fromDate, TimeSpan.Zero);
+var to = new DateTimeOffset(toDate.AddDays(1), TimeSpan.Zero).AddTicks(-1);
+
+var splitDate = TryParseDate(config["split_date"]);
 
 var electricConsumption = (await octopusClient.GetElectricityConsumptionAsync(electricityMPAN, electricitySerial, from, to, Interval.Day)).ToList();
 
@@ -47,18 +52,25 @@ var weather = await GetWeather(visualCrossingKey, new HttpClient(), weatherLoc, 
 
 var tempDict = weather.ToDictionary(x => x.DateTime, x => x.Temp);
 DrawGasTempScatterChart(gasConsumption, tempDict);
-DrawGasTempScatterChartWithSplit(gasConsumption, tempDict, new DateTime(2024, 12, 01));
+if (splitDate.HasValue)
+{
+    DrawGasTempScatterChartWithSplit(gasConsumption, tempDict, splitDate.Value);
+}
 DrawGasPlusElectricityTempScatterChart(gasConsumption, electricConsumption, tempDict);
-WriteIndexHtml();
+WriteIndexHtml(splitDate.HasValue);
 
 var app = builder.Build();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.Run();
 
-void WriteIndexHtml()
+void WriteIndexHtml(bool includeSplit)
 {
-    File.WriteAllText("output/index.html", """
+    var splitFigure = includeSplit
+        ? """<figure><img src="gas-temp-scatter-split.png" alt="Gas usage vs temperature (split)"></figure>"""
+        : "";
+
+    File.WriteAllText("output/index.html", $$"""
         <!doctype html>
         <html lang="en">
         <head>
@@ -76,12 +88,24 @@ void WriteIndexHtml()
         <figure><img src="gas-usage.png" alt="Gas usage"></figure>
         <figure><img src="electric-usage.png" alt="Electricity usage"></figure>
         <figure><img src="gas-temp-scatter.png" alt="Gas usage vs temperature"></figure>
-        <figure><img src="gas-temp-scatter-split.png" alt="Gas usage vs temperature (split)"></figure>
+        {{splitFigure}}
         <figure><img src="total-energy-temp-scatter.png" alt="Total energy usage vs temperature"></figure>
         </body>
         </html>
         """);
 }
+
+DateTime? TryParseDate(string? value)
+{
+    if (value is not null && DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+    {
+        return parsed.Date;
+    }
+
+    return null;
+}
+
+DateTime ParseDate(string? value, DateTime fallback) => TryParseDate(value) ?? fallback;
 
 void DrawGasTempScatterChart(List<Consumption> gasConsumption, Dictionary<string, decimal> tempDict)
 {
@@ -89,7 +113,10 @@ void DrawGasTempScatterChart(List<Consumption> gasConsumption, Dictionary<string
     var ys = new List<decimal>();
 
     foreach (var gasDay in gasConsumption) {
-        var temp = tempDict[gasDay.Start.ToString("yyyy-MM-dd")];
+        if (!tempDict.TryGetValue(gasDay.Start.ToString("yyyy-MM-dd"), out var temp)) {
+            continue;
+        }
+
         ys.Add(gasDay.Quantity);
         xs.Add(temp);
     }
@@ -111,7 +138,9 @@ void DrawGasTempScatterChartWithSplit(List<Consumption> gasConsumption, Dictiona
     var ys2 = new List<decimal>();
 
     foreach (var gasDay in gasConsumption) {
-        var temp = tempDict[gasDay.Start.ToString("yyyy-MM-dd")];
+        if (!tempDict.TryGetValue(gasDay.Start.ToString("yyyy-MM-dd"), out var temp)) {
+            continue;
+        }
 
         if (gasDay.Start < splitDate) {
             ys1.Add(gasDay.Quantity);
@@ -142,8 +171,9 @@ void DrawGasPlusElectricityTempScatterChart(List<Consumption> gasConsumption, Li
 
     foreach (var gasDay in gasConsumption) {
         var day = gasDay.Start.ToString("yyyy-MM-dd");
-        var temp = tempDict[day];
-        var electricForDay = electricLookup[day];
+        if (!tempDict.TryGetValue(day, out var temp) || !electricLookup.TryGetValue(day, out var electricForDay)) {
+            continue;
+        }
 
         // add all the usages together and convert gas m^3 to rough kwh (for exact, need to switch the 38 for our specific caloric value)
         var totalKwh = (double)electricForDay + ((double)gasDay.Quantity * 38 * 1.02264 / 3.6);
@@ -170,7 +200,6 @@ void DrawGasUsage(List<Consumption> electricConsumption)
     gasPlot.XLabel("Date");
     gasPlot.YLabel("Consumption (m^3)");
     gasPlot.Title("Gas usage");
-    gasPlot.Axes.SetLimitsY(0, 12.5);
     gasPlot.SavePng("output/gas-usage.png", 1000, 800);
 }
 
@@ -183,7 +212,6 @@ void DrawElectricityUsage(List<Consumption> electricConsumption)
     leccyPlot.XLabel("Date");
     leccyPlot.YLabel("Consumption (kWh)");
     leccyPlot.Title("Electricity usage");
-    leccyPlot.Axes.SetLimitsY(0, 25);
     leccyPlot.SavePng("output/electric-usage.png", 1000, 800);
 }
 
