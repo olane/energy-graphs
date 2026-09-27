@@ -4,6 +4,9 @@ To set your secret values:
 
 ```
 dotnet user-secrets set octopus_api_key <octopus api key>
+dotnet user-secrets set octopus_account <octopus account number>   # optional, enables meter discovery
+
+# optional fallback used only when octopus_account is not set
 dotnet user-secrets set electricity_mpan <electric meter MPAN>
 dotnet user-secrets set electricity_serial <electric meter serial number>
 dotnet user-secrets set gas_mprn <gas meter MPRN>
@@ -33,10 +36,7 @@ docker build -t energy-graphs .
 docker run --rm -p 8080:8080 \
   -v energy-graphs-cache:/app/cache \
   -e octopus_api_key=<octopus api key> \
-  -e electricity_mpan=<electric meter MPAN> \
-  -e electricity_serial=<electric meter serial number> \
-  -e gas_mprn=<gas meter MPRN> \
-  -e gas_serial=<gas meter serial number> \
+  -e octopus_account=<octopus account number> \
   -e visualcrossing_key=<VisualCrossing.com API key> \
   energy-graphs
 ```
@@ -44,6 +44,28 @@ docker run --rm -p 8080:8080 \
 Then open http://localhost:8080.
 
 Each environment variable is an alternative to the matching `dotnet user-secrets` entry above.
+
+## Meters
+
+If `octopus_account` is set, meters are discovered from `GET /v1/accounts/<account>/` instead of being configured:
+
+- It selects the **active property** (`moved_out_at` is null; if several, the most recently moved-into). The account endpoint lists every property ever, including old houses, so this filter is what keeps them out.
+- It takes all non-export electricity meter points and all gas meter points, **all serials each**, and merges consumption across them. This means a meter exchange keeps the full history (e.g. an old `18P2136356` plus its replacement `22E5239768`).
+
+If `octopus_account` is not set, the app falls back to the explicit `electricity_mpan`/`electricity_serial`/`gas_mprn`/`gas_serial` values.
+
+## Configuration
+
+The date range defaults to **all time**: `from_date` comes from the discovered property's move-in date (falling back to open-ended when unknown), and `to_date` is today. Both can be overridden with settings/config (env vars or user-secrets):
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `from_date` | property move-in date (or open-ended) | First day to fetch (`yyyy-MM-dd`) |
+| `to_date` | today (UTC) | Last day to fetch (`yyyy-MM-dd`) |
+| `split_date` | unset | When set, draws `gas-temp-scatter-split.png` colouring data before/after this date; the chart is omitted when unset |
+| `cache_dir` | `cache` | Weather cache directory |
+
+Weather is fetched only for the days that actually have consumption data. Usage graphs auto-scale their y-axis.
 
 ### Prebuilt image
 
@@ -61,9 +83,9 @@ docker run --rm -p 8080:8080 \
 
 ### Weather cache
 
-VisualCrossing calls are billed, so responses are cached as `cache/<md5-of-url>` and reused on later runs. The cache key includes the API key and the hard-coded date range, so it stays valid across restarts.
+VisualCrossing calls are billed, so weather is cached **per day** as `cache/<md5(location|date)>`. Each run only requests days that aren't cached yet — normally just the newly added day — so extending the range never re-fetches (and re-bills) the whole period. The key is the location and date, not the API key or the request range, so it stays valid as the window grows.
 
-The `-v energy-graphs-cache:/app/cache` mount above is important: without it, the cache lives in the container's writable layer and is lost on every container replacement, forcing a fresh (paid) API call. On first creation the named volume is seeded from whatever `cache/` directory exists at `docker build` time (the local one is copied in if present), and it is never overwritten by later rebuilds.
+The `-v energy-graphs-cache:/app/cache` mount above is important: without it, the cache lives in the container's writable layer and is lost on every container replacement, forcing fresh (paid) API calls. On first creation the named volume is seeded from whatever `cache/` directory exists at `docker build` time (the local one is copied in if present), and it is never overwritten by later rebuilds.
 
 To reuse your existing host cache directly instead, bind-mount it:
 

@@ -1,4 +1,5 @@
 ﻿using System.Drawing;
+using System.Globalization;
 using System.Text.Json;
 using CommunityToolkit.Diagnostics;
 using ImpSoft.OctopusEnergy.Api;
@@ -13,6 +14,7 @@ builder.Configuration.AddUserSecrets<Program>();
 var config = builder.Configuration;
 
 var apiKey = config["octopus_api_key"];
+var octopusAccount = config["octopus_account"];
 var electricityMPAN = config["electricity_mpan"];
 var electricitySerial = config["electricity_serial"];
 var gasMPRN = config["gas_mprn"];
@@ -31,34 +33,64 @@ httpClient.SetAuthenticationHeaderFromApiKey(apiKey);
 // Create the api wrapper
 var octopusClient = new OctopusEnergyClient(httpClient);
 
-var from = new DateTimeOffset(2023, 09, 01, 00, 00, 00, TimeSpan.FromHours(0));
-var to = new DateTimeOffset(2024, 12, 13, 23, 59, 00, TimeSpan.FromHours(0));
+var electricityMeters = new List<(string Mpan, string Serial)>();
+var gasMeters = new List<(string Mprn, string Serial)>();
+DateTime? propertyMovedIn = null;
 
-var electricConsumption = (await octopusClient.GetElectricityConsumptionAsync(electricityMPAN, electricitySerial, from, to, Interval.Day)).ToList();
+if (!string.IsNullOrWhiteSpace(octopusAccount))
+{
+    (electricityMeters, gasMeters, propertyMovedIn) = await DiscoverMeters(octopusAccount, httpClient);
+}
+else
+{
+    electricityMeters.Add((electricityMPAN!, electricitySerial!));
+    gasMeters.Add((gasMPRN!, gasSerial!));
+}
 
-// For SMETS1 this is kwh equivalent, for SMETS2 it is in m^3
-var gasConsumption = (await octopusClient.GetGasConsumptionAsync(gasMPRN, gasSerial, from, to, Interval.Day)).ToList();
+var toDate = ParseDate(config["to_date"], DateTime.UtcNow.Date);
+// Default to all time: from the property's move-in date when known, otherwise open-ended.
+var fromDate = TryParseDate(config["from_date"]) ?? propertyMovedIn ?? DateTime.UnixEpoch;
+var from = new DateTimeOffset(fromDate, TimeSpan.Zero);
+var to = new DateTimeOffset(toDate.AddDays(1), TimeSpan.Zero).AddTicks(-1);
+
+var splitDate = TryParseDate(config["split_date"]);
+
+var electricConsumption = await FetchConsumption(electricityMeters, (mpan, serial) => octopusClient.GetElectricityConsumptionAsync(mpan, serial, from, to, Interval.Day));
+
+// For SMETS1 gas is kwh equivalent, for SMETS2 it is in m^3
+var gasConsumption = await FetchConsumption(gasMeters, (mprn, serial) => octopusClient.GetGasConsumptionAsync(mprn, serial, from, to, Interval.Day));
 
 Directory.CreateDirectory("output");
 DrawGasUsage(gasConsumption);
 DrawElectricityUsage(electricConsumption);
 
-var weather = await GetWeather(visualCrossingKey, new HttpClient(), weatherLoc, from.Date, to.Date);
+// Only fetch weather for days that actually have consumption data.
+var consumptionStarts = electricConsumption.Select(x => x.Start).Concat(gasConsumption.Select(x => x.Start)).ToList();
+var weather = consumptionStarts.Count > 0
+    ? await GetWeather(visualCrossingKey, new HttpClient(), weatherLoc, consumptionStarts.Min().Date, consumptionStarts.Max().Date)
+    : new List<WeatherDay>();
 
 var tempDict = weather.ToDictionary(x => x.DateTime, x => x.Temp);
 DrawGasTempScatterChart(gasConsumption, tempDict);
-DrawGasTempScatterChartWithSplit(gasConsumption, tempDict, new DateTime(2024, 12, 01));
+if (splitDate.HasValue)
+{
+    DrawGasTempScatterChartWithSplit(gasConsumption, tempDict, splitDate.Value);
+}
 DrawGasPlusElectricityTempScatterChart(gasConsumption, electricConsumption, tempDict);
-WriteIndexHtml();
+WriteIndexHtml(splitDate.HasValue);
 
 var app = builder.Build();
 app.UseDefaultFiles();
 app.UseStaticFiles();
 app.Run();
 
-void WriteIndexHtml()
+void WriteIndexHtml(bool includeSplit)
 {
-    File.WriteAllText("output/index.html", """
+    var splitFigure = includeSplit
+        ? """<figure><img src="gas-temp-scatter-split.png" alt="Gas usage vs temperature (split)"></figure>"""
+        : "";
+
+    File.WriteAllText("output/index.html", $$"""
         <!doctype html>
         <html lang="en">
         <head>
@@ -76,11 +108,89 @@ void WriteIndexHtml()
         <figure><img src="gas-usage.png" alt="Gas usage"></figure>
         <figure><img src="electric-usage.png" alt="Electricity usage"></figure>
         <figure><img src="gas-temp-scatter.png" alt="Gas usage vs temperature"></figure>
-        <figure><img src="gas-temp-scatter-split.png" alt="Gas usage vs temperature (split)"></figure>
+        {{splitFigure}}
         <figure><img src="total-energy-temp-scatter.png" alt="Total energy usage vs temperature"></figure>
         </body>
         </html>
         """);
+}
+
+DateTime? TryParseDate(string? value)
+{
+    if (value is not null && DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsed))
+    {
+        return parsed.Date;
+    }
+
+    return null;
+}
+
+DateTime ParseDate(string? value, DateTime fallback) => TryParseDate(value) ?? fallback;
+
+DateTimeOffset ParseInstant(string? value) =>
+    DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed)
+        ? parsed
+        : DateTimeOffset.MinValue;
+
+async Task<(List<(string Mpan, string Serial)> Electricity, List<(string Mprn, string Serial)> Gas, DateTime? MovedIn)> DiscoverMeters(string account, HttpClient client)
+{
+    var response = await client.GetAsync($"https://api.octopus.energy/v1/accounts/{account}/");
+    response.EnsureSuccessStatusCode();
+
+    var json = await response.Content.ReadAsStringAsync();
+    var accountResponse = JsonSerializer.Deserialize<AccountResponse>(json, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+    });
+
+    var properties = accountResponse?.Properties ?? new List<AccountProperty>();
+
+    // Prefer the active property (no moved_out_at), most recently moved into.
+    var candidates = properties
+        .Where(p => p.MovedOutAt is null)
+        .OrderByDescending(p => ParseInstant(p.MovedInAt))
+        .ToList();
+
+    if (candidates.Count == 0)
+    {
+        candidates = properties.OrderByDescending(p => ParseInstant(p.MovedInAt)).ToList();
+    }
+
+    if (candidates.Count == 0)
+    {
+        throw new InvalidOperationException($"No meter points found on account {account}");
+    }
+
+    var property = candidates[0];
+
+    var electricity = property.ElectricityMeterPoints
+        .Where(mp => !mp.IsExport)
+        .SelectMany(mp => mp.Meters.Select(m => (Mpan: mp.Mpan, Serial: m.SerialNumber)))
+        .ToList();
+
+    var gas = property.GasMeterPoints
+        .SelectMany(mp => mp.Meters.Select(m => (Mprn: mp.Mprn, Serial: m.SerialNumber)))
+        .ToList();
+
+    var movedIn = ParseInstant(property.MovedInAt);
+
+    return (electricity, gas, movedIn == DateTimeOffset.MinValue ? null : movedIn.UtcDateTime.Date);
+}
+
+async Task<List<Consumption>> FetchConsumption(List<(string Id, string Serial)> meters, Func<string, string, Task<IEnumerable<Consumption>>> fetch)
+{
+    var all = new List<Consumption>();
+    foreach (var (id, serial) in meters)
+    {
+        all.AddRange(await fetch(id, serial));
+    }
+
+    // Meter exchanges leave data split across serials; stitch them together.
+    return all
+        .GroupBy(x => x.Start)
+        .Select(g => g.First())
+        .OrderBy(x => x.Start)
+        .ToList();
 }
 
 void DrawGasTempScatterChart(List<Consumption> gasConsumption, Dictionary<string, decimal> tempDict)
@@ -89,7 +199,10 @@ void DrawGasTempScatterChart(List<Consumption> gasConsumption, Dictionary<string
     var ys = new List<decimal>();
 
     foreach (var gasDay in gasConsumption) {
-        var temp = tempDict[gasDay.Start.ToString("yyyy-MM-dd")];
+        if (!tempDict.TryGetValue(gasDay.Start.ToString("yyyy-MM-dd"), out var temp)) {
+            continue;
+        }
+
         ys.Add(gasDay.Quantity);
         xs.Add(temp);
     }
@@ -111,7 +224,9 @@ void DrawGasTempScatterChartWithSplit(List<Consumption> gasConsumption, Dictiona
     var ys2 = new List<decimal>();
 
     foreach (var gasDay in gasConsumption) {
-        var temp = tempDict[gasDay.Start.ToString("yyyy-MM-dd")];
+        if (!tempDict.TryGetValue(gasDay.Start.ToString("yyyy-MM-dd"), out var temp)) {
+            continue;
+        }
 
         if (gasDay.Start < splitDate) {
             ys1.Add(gasDay.Quantity);
@@ -142,8 +257,9 @@ void DrawGasPlusElectricityTempScatterChart(List<Consumption> gasConsumption, Li
 
     foreach (var gasDay in gasConsumption) {
         var day = gasDay.Start.ToString("yyyy-MM-dd");
-        var temp = tempDict[day];
-        var electricForDay = electricLookup[day];
+        if (!tempDict.TryGetValue(day, out var temp) || !electricLookup.TryGetValue(day, out var electricForDay)) {
+            continue;
+        }
 
         // add all the usages together and convert gas m^3 to rough kwh (for exact, need to switch the 38 for our specific caloric value)
         var totalKwh = (double)electricForDay + ((double)gasDay.Quantity * 38 * 1.02264 / 3.6);
@@ -170,7 +286,6 @@ void DrawGasUsage(List<Consumption> electricConsumption)
     gasPlot.XLabel("Date");
     gasPlot.YLabel("Consumption (m^3)");
     gasPlot.Title("Gas usage");
-    gasPlot.Axes.SetLimitsY(0, 12.5);
     gasPlot.SavePng("output/gas-usage.png", 1000, 800);
 }
 
@@ -183,41 +298,100 @@ void DrawElectricityUsage(List<Consumption> electricConsumption)
     leccyPlot.XLabel("Date");
     leccyPlot.YLabel("Consumption (kWh)");
     leccyPlot.Title("Electricity usage");
-    leccyPlot.Axes.SetLimitsY(0, 25);
     leccyPlot.SavePng("output/electric-usage.png", 1000, 800);
 }
 
 
 async Task<List<WeatherDay>> GetWeather(string vcApiKey, HttpClient client, string weatherLocation, DateTime from, DateTime to) {
+    var days = new List<WeatherDay>();
+    var missingRuns = new List<(DateTime Start, DateTime End)>();
+
+    DateTime? runStart = null;
+    DateTime? runEnd = null;
+
+    // Cache is per day, so a new day only ever fetches that day.
+    for (var date = from.Date; date <= to.Date; date = date.AddDays(1)) {
+        if (TryReadCachedDay(weatherLocation, date, out var cached)) {
+            days.Add(cached!);
+            if (runStart is not null) {
+                missingRuns.Add((runStart.Value, runEnd!.Value));
+                runStart = runEnd = null;
+            }
+        }
+        else {
+            runStart ??= date;
+            runEnd = date;
+        }
+    }
+
+    if (runStart is not null) {
+        missingRuns.Add((runStart.Value, runEnd!.Value));
+    }
+
+    if (missingRuns.Count > 0) {
+        Directory.CreateDirectory(cacheDir);
+    }
+
+    foreach (var (start, end) in missingRuns) {
+        // Keep each request bounded; the per-day cache means each day is billed once.
+        for (var chunkStart = start; chunkStart <= end; chunkStart = chunkStart.AddDays(366)) {
+            var chunkEnd = chunkStart.AddDays(365);
+            if (chunkEnd > end) {
+                chunkEnd = end;
+            }
+
+            var fetched = await FetchWeatherRange(vcApiKey, client, weatherLocation, chunkStart, chunkEnd);
+            foreach (var day in fetched) {
+                WriteCachedDay(weatherLocation, day);
+                days.Add(day);
+            }
+        }
+    }
+
+    return days
+        .GroupBy(x => x.DateTime)
+        .Select(g => g.First())
+        .OrderBy(x => x.DateTime)
+        .ToList();
+}
+
+async Task<List<WeatherDay>> FetchWeatherRange(string vcApiKey, HttpClient client, string weatherLocation, DateTime from, DateTime to) {
     var fromString = from.ToString("yyyy-MM-dd");
     var toString = to.ToString("yyyy-MM-dd");
 
     var uri = $"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/{weatherLocation}/{fromString}/{toString}?unitGroup=metric&key={vcApiKey}&contentType=json";
 
-    string body;
+    var response = await client.GetAsync(uri);
+    response.EnsureSuccessStatusCode();
 
-    var hash = CreateMD5(uri);
-    var cacheFileName = Path.Combine(cacheDir, hash);
-    if(File.Exists(cacheFileName)) {
-        body = File.ReadAllText(cacheFileName);
-    }
-    else {
-        //throw new Exception("");
-        var request = new HttpRequestMessage(HttpMethod.Get, uri);
-
-        var response = await client.SendAsync(request);
-        body = await response.Content.ReadAsStringAsync();
-        response.EnsureSuccessStatusCode(); 
-        
-        Directory.CreateDirectory(cacheDir);
-        File.WriteAllText(cacheFileName, body);
-    }
-    
-    WeatherResponse? weatherResponse = JsonSerializer.Deserialize<WeatherResponse>(body, new JsonSerializerOptions{
+    var body = await response.Content.ReadAsStringAsync();
+    var weatherResponse = JsonSerializer.Deserialize<WeatherResponse>(body, new JsonSerializerOptions{
         PropertyNameCaseInsensitive = true
     });
 
-    return weatherResponse.Days;
+    return weatherResponse?.Days ?? new List<WeatherDay>();
+}
+
+string WeatherCacheFile(string weatherLocation, DateTime date) =>
+    Path.Combine(cacheDir, CreateMD5($"{weatherLocation}|{date:yyyy-MM-dd}"));
+
+bool TryReadCachedDay(string weatherLocation, DateTime date, out WeatherDay? day) {
+    var cacheFileName = WeatherCacheFile(weatherLocation, date);
+    if (File.Exists(cacheFileName)) {
+        day = JsonSerializer.Deserialize<WeatherDay>(File.ReadAllText(cacheFileName), new JsonSerializerOptions{
+            PropertyNameCaseInsensitive = true
+        });
+        return day is not null;
+    }
+
+    day = null;
+    return false;
+}
+
+void WriteCachedDay(string weatherLocation, WeatherDay day) {
+    if (DateTime.TryParse(day.DateTime, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date)) {
+        File.WriteAllText(WeatherCacheFile(weatherLocation, date), JsonSerializer.Serialize(day));
+    }
 }
 
 string CreateMD5(string input)
@@ -239,4 +413,30 @@ public class WeatherDay {
     public string DateTime {get; set;} // format yyyy-MM-dd
     public int DatetimeEpoch {get; set;}
     public decimal Temp {get; set;}
+}
+
+public class AccountResponse {
+    public List<AccountProperty> Properties { get; set; } = new();
+}
+
+public class AccountProperty {
+    public string? MovedInAt { get; set; }
+    public string? MovedOutAt { get; set; }
+    public List<ElectricityMeterPoint> ElectricityMeterPoints { get; set; } = new();
+    public List<GasMeterPoint> GasMeterPoints { get; set; } = new();
+}
+
+public class ElectricityMeterPoint {
+    public string Mpan { get; set; } = string.Empty;
+    public bool IsExport { get; set; }
+    public List<Meter> Meters { get; set; } = new();
+}
+
+public class GasMeterPoint {
+    public string Mprn { get; set; } = string.Empty;
+    public List<Meter> Meters { get; set; } = new();
+}
+
+public class Meter {
+    public string SerialNumber { get; set; } = string.Empty;
 }
