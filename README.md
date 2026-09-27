@@ -4,6 +4,9 @@ To set your secret values:
 
 ```
 dotnet user-secrets set octopus_api_key <octopus api key>
+dotnet user-secrets set octopus_account <octopus account number>   # optional, enables meter discovery
+
+# optional fallback used only when octopus_account is not set
 dotnet user-secrets set electricity_mpan <electric meter MPAN>
 dotnet user-secrets set electricity_serial <electric meter serial number>
 dotnet user-secrets set gas_mprn <gas meter MPRN>
@@ -33,10 +36,7 @@ docker build -t energy-graphs .
 docker run --rm -p 8080:8080 \
   -v energy-graphs-cache:/app/cache \
   -e octopus_api_key=<octopus api key> \
-  -e electricity_mpan=<electric meter MPAN> \
-  -e electricity_serial=<electric meter serial number> \
-  -e gas_mprn=<gas meter MPRN> \
-  -e gas_serial=<gas meter serial number> \
+  -e octopus_account=<octopus account number> \
   -e visualcrossing_key=<VisualCrossing.com API key> \
   energy-graphs
 ```
@@ -44,6 +44,15 @@ docker run --rm -p 8080:8080 \
 Then open http://localhost:8080.
 
 Each environment variable is an alternative to the matching `dotnet user-secrets` entry above.
+
+## Meters
+
+If `octopus_account` is set, meters are discovered from `GET /v1/accounts/<account>/` instead of being configured:
+
+- It selects the **active property** (`moved_out_at` is null; if several, the most recently moved-into). The account endpoint lists every property ever, including old houses, so this filter is what keeps them out.
+- It takes all non-export electricity meter points and all gas meter points, **all serials each**, and merges consumption across them. This means a meter exchange keeps the full history (e.g. an old `18P2136356` plus its replacement `22E5239768`).
+
+If `octopus_account` is not set, the app falls back to the explicit `electricity_mpan`/`electricity_serial`/`gas_mprn`/`gas_serial` values.
 
 ## Configuration
 

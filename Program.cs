@@ -14,6 +14,7 @@ builder.Configuration.AddUserSecrets<Program>();
 var config = builder.Configuration;
 
 var apiKey = config["octopus_api_key"];
+var octopusAccount = config["octopus_account"];
 var electricityMPAN = config["electricity_mpan"];
 var electricitySerial = config["electricity_serial"];
 var gasMPRN = config["gas_mprn"];
@@ -39,10 +40,23 @@ var to = new DateTimeOffset(toDate.AddDays(1), TimeSpan.Zero).AddTicks(-1);
 
 var splitDate = TryParseDate(config["split_date"]);
 
-var electricConsumption = (await octopusClient.GetElectricityConsumptionAsync(electricityMPAN, electricitySerial, from, to, Interval.Day)).ToList();
+var electricityMeters = new List<(string Mpan, string Serial)>();
+var gasMeters = new List<(string Mprn, string Serial)>();
 
-// For SMETS1 this is kwh equivalent, for SMETS2 it is in m^3
-var gasConsumption = (await octopusClient.GetGasConsumptionAsync(gasMPRN, gasSerial, from, to, Interval.Day)).ToList();
+if (!string.IsNullOrWhiteSpace(octopusAccount))
+{
+    (electricityMeters, gasMeters) = await DiscoverMeters(octopusAccount, httpClient);
+}
+else
+{
+    electricityMeters.Add((electricityMPAN!, electricitySerial!));
+    gasMeters.Add((gasMPRN!, gasSerial!));
+}
+
+var electricConsumption = await FetchConsumption(electricityMeters, (mpan, serial) => octopusClient.GetElectricityConsumptionAsync(mpan, serial, from, to, Interval.Day));
+
+// For SMETS1 gas is kwh equivalent, for SMETS2 it is in m^3
+var gasConsumption = await FetchConsumption(gasMeters, (mprn, serial) => octopusClient.GetGasConsumptionAsync(mprn, serial, from, to, Interval.Day));
 
 Directory.CreateDirectory("output");
 DrawGasUsage(gasConsumption);
@@ -106,6 +120,70 @@ DateTime? TryParseDate(string? value)
 }
 
 DateTime ParseDate(string? value, DateTime fallback) => TryParseDate(value) ?? fallback;
+
+DateTimeOffset ParseInstant(string? value) =>
+    DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var parsed)
+        ? parsed
+        : DateTimeOffset.MinValue;
+
+async Task<(List<(string Mpan, string Serial)> Electricity, List<(string Mprn, string Serial)> Gas)> DiscoverMeters(string account, HttpClient client)
+{
+    var response = await client.GetAsync($"https://api.octopus.energy/v1/accounts/{account}/");
+    response.EnsureSuccessStatusCode();
+
+    var json = await response.Content.ReadAsStringAsync();
+    var accountResponse = JsonSerializer.Deserialize<AccountResponse>(json, new JsonSerializerOptions
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+    });
+
+    var properties = accountResponse?.Properties ?? new List<AccountProperty>();
+
+    // Prefer the active property (no moved_out_at), most recently moved into.
+    var candidates = properties
+        .Where(p => p.MovedOutAt is null)
+        .OrderByDescending(p => ParseInstant(p.MovedInAt))
+        .ToList();
+
+    if (candidates.Count == 0)
+    {
+        candidates = properties.OrderByDescending(p => ParseInstant(p.MovedInAt)).ToList();
+    }
+
+    if (candidates.Count == 0)
+    {
+        throw new InvalidOperationException($"No meter points found on account {account}");
+    }
+
+    var property = candidates[0];
+
+    var electricity = property.ElectricityMeterPoints
+        .Where(mp => !mp.IsExport)
+        .SelectMany(mp => mp.Meters.Select(m => (Mpan: mp.Mpan, Serial: m.SerialNumber)))
+        .ToList();
+
+    var gas = property.GasMeterPoints
+        .SelectMany(mp => mp.Meters.Select(m => (Mprn: mp.Mprn, Serial: m.SerialNumber)))
+        .ToList();
+
+    return (electricity, gas);
+}
+
+async Task<List<Consumption>> FetchConsumption(List<(string Id, string Serial)> meters, Func<string, string, Task<IEnumerable<Consumption>>> fetch)
+{
+    var all = new List<Consumption>();
+    foreach (var (id, serial) in meters)
+    {
+        all.AddRange(await fetch(id, serial));
+    }
+
+    // Meter exchanges leave data split across serials; stitch them together.
+    return all
+        .GroupBy(x => x.Start)
+        .Select(g => g.First())
+        .OrderBy(x => x.Start)
+        .ToList();
+}
 
 void DrawGasTempScatterChart(List<Consumption> gasConsumption, Dictionary<string, decimal> tempDict)
 {
@@ -267,4 +345,30 @@ public class WeatherDay {
     public string DateTime {get; set;} // format yyyy-MM-dd
     public int DatetimeEpoch {get; set;}
     public decimal Temp {get; set;}
+}
+
+public class AccountResponse {
+    public List<AccountProperty> Properties { get; set; } = new();
+}
+
+public class AccountProperty {
+    public string? MovedInAt { get; set; }
+    public string? MovedOutAt { get; set; }
+    public List<ElectricityMeterPoint> ElectricityMeterPoints { get; set; } = new();
+    public List<GasMeterPoint> GasMeterPoints { get; set; } = new();
+}
+
+public class ElectricityMeterPoint {
+    public string Mpan { get; set; } = string.Empty;
+    public bool IsExport { get; set; }
+    public List<Meter> Meters { get; set; } = new();
+}
+
+public class GasMeterPoint {
+    public string Mprn { get; set; } = string.Empty;
+    public List<Meter> Meters { get; set; } = new();
+}
+
+public class Meter {
+    public string SerialNumber { get; set; } = string.Empty;
 }
