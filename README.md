@@ -62,10 +62,13 @@ The date range defaults to **all time**: `from_date` comes from the discovered p
 | --- | --- | --- |
 | `from_date` | property move-in date (or open-ended) | First day to fetch (`yyyy-MM-dd`) |
 | `to_date` | today (UTC) | Last day to fetch (`yyyy-MM-dd`) |
-| `split_dates` | one split per calendar year | Comma-separated `yyyy-MM-dd` split points for `gas-temp-scatter-split.png` (one colour per period, with a legend). When unset the periods default to calendar-year boundaries, so each year gets its own colour. `split_date` is accepted as an alias for a single split. |
+| `split_dates` | one split per calendar year | Comma-separated `yyyy-MM-dd` split points for the `*-split.png` graphs (one colour per period, with a legend). When unset the periods default to calendar-year boundaries, so each year gets its own colour. Applied to both the gas and total-energy scatter graphs. `split_date` is accepted as an alias for a single split. |
 | `cache_dir` | `cache` | Weather cache directory |
+| `refresh_hours` | `24` | Hours between automatic graph regenerations. Set to `0` to generate only once at startup. |
 
-Weather is fetched only for the days that actually have consumption data. Usage graphs auto-scale their y-axis.
+Weather is fetched only for the days that actually have consumption data. Usage graphs auto-scale their y-axis. Date axes are labelled like `Oct 26` (with the year shown at January boundaries).
+
+The graphs are generated once at startup and then regenerated every `refresh_hours` (default 24). Because weather is cached per day, a daily regeneration only ever fetches the newly added day — normally a single weather API call per day.
 
 Graphs produced in `output/`:
 
