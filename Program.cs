@@ -26,6 +26,9 @@ var weatherLoc = "Cambridge%20UK";
 
 var cacheDir = config["cache_dir"] ?? "cache";
 
+// Bump when the cached WeatherDay schema changes so stale entries are refetched.
+const string weatherCacheVersion = "v2";
+
 using var httpClient = new HttpClient();
 
 httpClient.SetAuthenticationHeaderFromApiKey(apiKey);
@@ -90,7 +93,11 @@ var weather = consumptionStarts.Count > 0
     : new List<WeatherDay>();
 
 var tempDict = weather.ToDictionary(x => x.DateTime, x => x.Temp);
+var daylightDict = weather
+    .Where(x => x.SunriseEpoch > 0 && x.SunsetEpoch > 0)
+    .ToDictionary(x => x.DateTime, x => (decimal)(x.SunsetEpoch - x.SunriseEpoch) / 3600m);
 DrawGasTempScatterChart(gasConsumption, tempDict);
+DrawElectricityDaylightScatterChart(electricConsumption, daylightDict);
 if (consumptionStarts.Count > 0)
 {
     DrawGasTempScatterChartWithPeriods(gasConsumption, tempDict, splitDates);
@@ -129,6 +136,7 @@ void WriteIndexHtml(bool includeSplit)
         <figure><img src="gas-temp-scatter.png" alt="Gas usage vs temperature"></figure>
         {{splitFigure}}
         <figure><img src="total-energy-temp-scatter.png" alt="Total energy usage vs temperature"></figure>
+        <figure><img src="electric-daylight-scatter.png" alt="Electricity usage vs daylight hours"></figure>
         </body>
         </html>
         """);
@@ -324,6 +332,29 @@ void DrawGasPlusElectricityTempScatterChart(List<Consumption> gasConsumption, Li
     gasPlot.SavePng("output/total-energy-temp-scatter.png", 1000, 800);
 }
 
+void DrawElectricityDaylightScatterChart(List<Consumption> electricConsumption, Dictionary<string, decimal> daylightDict)
+{
+    var xs = new List<decimal>();
+    var ys = new List<decimal>();
+
+    foreach (var electricDay in electricConsumption) {
+        if (!daylightDict.TryGetValue(electricDay.Start.ToString("yyyy-MM-dd"), out var daylightHours)) {
+            continue;
+        }
+
+        xs.Add(daylightHours);
+        ys.Add(electricDay.Quantity);
+    }
+
+    ScottPlot.Plot leccyPlot = new();
+    leccyPlot.Add.ScatterPoints(xs, ys);
+
+    leccyPlot.XLabel("Daylight hours");
+    leccyPlot.YLabel("Consumption (kWh)");
+    leccyPlot.Title("Electricity usage vs daylight hours");
+    leccyPlot.SavePng("output/electric-daylight-scatter.png", 1000, 800);
+}
+
 void DrawGasUsage(List<Consumption> electricConsumption)
 {
     ScottPlot.Plot gasPlot = new();
@@ -420,7 +451,7 @@ async Task<List<WeatherDay>> FetchWeatherRange(string vcApiKey, HttpClient clien
 }
 
 string WeatherCacheFile(string weatherLocation, DateTime date) =>
-    Path.Combine(cacheDir, CreateMD5($"{weatherLocation}|{date:yyyy-MM-dd}"));
+    Path.Combine(cacheDir, CreateMD5($"{weatherLocation}|{date:yyyy-MM-dd}|{weatherCacheVersion}"));
 
 bool TryReadCachedDay(string weatherLocation, DateTime date, out WeatherDay? day) {
     var cacheFileName = WeatherCacheFile(weatherLocation, date);
@@ -460,6 +491,8 @@ public class WeatherDay {
     public string DateTime {get; set;} // format yyyy-MM-dd
     public int DatetimeEpoch {get; set;}
     public decimal Temp {get; set;}
+    public long SunriseEpoch {get; set;}
+    public long SunsetEpoch {get; set;}
 }
 
 public class AccountResponse {

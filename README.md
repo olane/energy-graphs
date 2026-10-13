@@ -67,6 +67,17 @@ The date range defaults to **all time**: `from_date` comes from the discovered p
 
 Weather is fetched only for the days that actually have consumption data. Usage graphs auto-scale their y-axis.
 
+Graphs produced in `output/`:
+
+| File | Description |
+| --- | --- |
+| `gas-usage.png` | Gas consumption over time |
+| `electric-usage.png` | Electricity consumption over time |
+| `gas-temp-scatter.png` | Gas usage vs daily average temperature |
+| `gas-temp-scatter-split.png` | Gas usage vs temperature, one colour per period (see `split_dates`) |
+| `total-energy-temp-scatter.png` | Gas + electricity (kWh) vs temperature |
+| `electric-daylight-scatter.png` | Electricity usage vs daylight hours (from weather sunrise/sunset) |
+
 ### Prebuilt image
 
 CI publishes images to GitHub Container Registry on pushes to `main` and on `v*` tags:
@@ -83,7 +94,7 @@ docker run --rm -p 8080:8080 \
 
 ### Weather cache
 
-VisualCrossing calls are billed, so weather is cached **per day** as `cache/<md5(location|date)>`. Each run only requests days that aren't cached yet — normally just the newly added day — so extending the range never re-fetches (and re-bills) the whole period. The key is the location and date, not the API key or the request range, so it stays valid as the window grows.
+VisualCrossing calls are billed, so weather is cached **per day** as `cache/<md5(location|date|version)>`. Each run only requests days that aren't cached yet — normally just the newly added day — so extending the range never re-fetches (and re-bills) the whole period. The key is the location, date and cache schema version, not the API key or the request range, so it stays valid as the window grows.
 
 The `-v energy-graphs-cache:/app/cache` mount above is important: without it, the cache lives in the container's writable layer and is lost on every container replacement, forcing fresh (paid) API calls. On first creation the named volume is seeded from whatever `cache/` directory exists at `docker build` time (the local one is copied in if present), and it is never overwritten by later rebuilds.
 
