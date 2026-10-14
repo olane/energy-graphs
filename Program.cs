@@ -118,7 +118,12 @@ async Task GenerateAsync()
 
 var app = builder.Build();
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions
+{
+    // Graphs are regenerated in place under stable filenames, so tell browsers to
+    // revalidate (ETag/Last-Modified) rather than serving a stale cached copy.
+    OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache"
+});
 
 await GenerateAsync();
 
