@@ -329,8 +329,39 @@ void DrawTempScatterWithPeriods(List<Consumption> gasConsumption, Dictionary<str
             continue;
         }
 
-        var series = gasPlot.Add.ScatterPoints(xs[i], ys[i], ScottPlot.Color.FromColor(periodColors[i % periodColors.Length]));
+        var color = ScottPlot.Color.FromColor(periodColors[i % periodColors.Length]);
+        var series = gasPlot.Add.ScatterPoints(xs[i], ys[i], color);
         series.LegendText = PeriodLabel(splitDates, i, firstYear);
+    }
+
+    // Draw a dashed best-fit line over each period's points so the trends are easy to compare.
+    // Above ~16 C usage flattens out, so including those days pulls the line away from the
+    // heating-dominated part of the relationship.
+    const double trendMaxTemperature = 16;
+    for (var i = 0; i < periodCount; i++) {
+        var trendXsList = new List<double>();
+        var trendYsList = new List<double>();
+        for (var j = 0; j < xs[i].Count; j++) {
+            if ((double)xs[i][j] > trendMaxTemperature) {
+                continue;
+            }
+
+            trendXsList.Add((double)xs[i][j]);
+            trendYsList.Add(ys[i][j]);
+        }
+
+        if (trendXsList.Count < 2) {
+            continue;
+        }
+
+        var regression = new ScottPlot.Statistics.LinearRegression(
+            trendXsList.ToArray(),
+            trendYsList.ToArray());
+        var trendXs = new[] { trendXsList.Min(), trendXsList.Max() };
+        var trend = gasPlot.Add.ScatterPoints(trendXs, regression.GetValues(trendXs), ScottPlot.Color.FromColor(periodColors[i % periodColors.Length]));
+        trend.MarkerSize = 0;
+        trend.LineWidth = 2;
+        trend.LinePattern = ScottPlot.LinePattern.Dashed;
     }
 
     gasPlot.ShowLegend();
