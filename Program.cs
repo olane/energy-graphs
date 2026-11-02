@@ -300,9 +300,11 @@ void DrawTempScatterWithPeriods(List<Consumption> gasConsumption, Dictionary<str
     var periodCount = splitDates.Count + 1;
     var xs = new List<decimal>[periodCount];
     var ys = new List<double>[periodCount];
+    var days = new List<DateTime>[periodCount];
     for (var i = 0; i < periodCount; i++) {
         xs[i] = new List<decimal>();
         ys[i] = new List<double>();
+        days[i] = new List<DateTime>();
     }
 
     DateTime? firstData = null;
@@ -319,6 +321,7 @@ void DrawTempScatterWithPeriods(List<Consumption> gasConsumption, Dictionary<str
         var period = splitDates.Count(split => gasDay.Start.DateTime >= split);
         ys[period].Add(y.Value);
         xs[period].Add(temp);
+        days[period].Add(gasDay.Start.DateTime.Date);
         firstData ??= gasDay.Start.DateTime;
     }
 
@@ -336,13 +339,14 @@ void DrawTempScatterWithPeriods(List<Consumption> gasConsumption, Dictionary<str
 
     // Draw a dashed best-fit line over each period's points so the trends are easy to compare.
     // Above ~16 C usage flattens out, so including those days pulls the line away from the
-    // heating-dominated part of the relationship.
+    // heating-dominated part of the relationship. The Christmas break is skipped too because
+    // being away from home makes those days unrepresentative.
     const double trendMaxTemperature = 16;
     for (var i = 0; i < periodCount; i++) {
         var trendXsList = new List<double>();
         var trendYsList = new List<double>();
         for (var j = 0; j < xs[i].Count; j++) {
-            if ((double)xs[i][j] > trendMaxTemperature) {
+            if ((double)xs[i][j] > trendMaxTemperature || IsChristmasBreak(days[i][j])) {
                 continue;
             }
 
@@ -390,6 +394,10 @@ string PeriodLabel(List<DateTime> splitDates, int period, int firstYear)
 
     return $"{splitDates[period - 1]:yyyy-MM-dd} to {splitDates[period]:yyyy-MM-dd}";
 }
+
+// Christmas Eve through New Year's Day, when we're often away from home.
+bool IsChristmasBreak(DateTime date) =>
+    (date.Month == 12 && date.Day >= 24) || (date.Month == 1 && date.Day == 1);
 
 double? TotalKwh(Consumption gasDay, Dictionary<string, decimal> electricLookup)
 {

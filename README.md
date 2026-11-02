@@ -77,9 +77,9 @@ Graphs produced in `output/`:
 | `gas-usage.png` | Gas consumption over time |
 | `electric-usage.png` | Electricity consumption over time |
 | `gas-temp-scatter.png` | Gas usage vs daily average temperature |
-| `gas-temp-scatter-split.png` | Gas usage vs temperature, one colour per period (see `split_dates`) with a dashed trend line per period, fitted to days at or below 16 °C |
+| `gas-temp-scatter-split.png` | Gas usage vs temperature, one colour per period (see `split_dates`) with a dashed trend line per period, fitted to days at or below 16 °C and excluding the Christmas break |
 | `total-energy-temp-scatter.png` | Gas + electricity (kWh) vs temperature |
-| `total-energy-temp-scatter-split.png` | Gas + electricity (kWh) vs temperature, one colour per period with a dashed trend line per period, fitted to days at or below 16 °C |
+| `total-energy-temp-scatter-split.png` | Gas + electricity (kWh) vs temperature, one colour per period with a dashed trend line per period, fitted to days at or below 16 °C and excluding the Christmas break |
 | `electric-daylight-scatter.png` | Electricity usage vs daylight hours (from weather sunrise/sunset) |
 
 ### Prebuilt image
