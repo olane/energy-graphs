@@ -138,6 +138,7 @@ async Task GenerateAsync()
             toDate,
             TryParseDate(config["change_date"]),
             ResolveTimeZone(config["time_zone"]),
+            electricConsumption,
             gasConsumption,
             tempDict)
         : null;
@@ -536,6 +537,7 @@ string? DrawElectricityTimeOfDayAnalysis(
     DateTime windowTo,
     DateTime? configuredChangeDate,
     TimeZoneInfo timeZone,
+    List<Consumption> electricConsumption,
     List<Consumption> gasConsumption,
     Dictionary<string, decimal> tempDict)
 {
@@ -619,8 +621,8 @@ string? DrawElectricityTimeOfDayAnalysis(
         {
             var before = BuildHalfHourProfile(slots, beforeFrom, beforeTo);
             var after = BuildHalfHourProfile(slots, afterFrom, afterTo);
-            DrawElectricityProfile(before, after);
-            DrawElectricityProfileChange(before, after);
+            DrawElectricityProfile(before, after, beforeFrom, beforeTo, afterFrom, afterTo, changeDate.Value);
+            DrawElectricityProfileChange(before, after, changeDate.Value);
 
             var beforeMean = MeanOfFinite(before);
             var afterMean = MeanOfFinite(after);
@@ -650,6 +652,12 @@ string? DrawElectricityTimeOfDayAnalysis(
                 }
             }
 
+            var overnightDeltas = Enumerable.Range(0, 12)
+                .Where(column => !double.IsNaN(deltas[column]))
+                .Select(column => deltas[column])
+                .ToArray();
+            var overnightDelta = overnightDeltas.Length == 0 ? 0 : Median(overnightDeltas);
+
             var beforeMedian = Median(dailyTotals
                 .Where(pair => pair.Key >= beforeFrom && pair.Key <= beforeTo)
                 .Select(pair => pair.Value)
@@ -658,6 +666,8 @@ string? DrawElectricityTimeOfDayAnalysis(
                 .Where(pair => pair.Key >= afterFrom && pair.Key <= afterTo)
                 .Select(pair => pair.Value)
                 .ToArray());
+            if (double.IsNaN(beforeMedian)) beforeMedian = beforeMean * 48;
+            if (double.IsNaN(afterMedian)) afterMedian = afterMean * 48;
             var dailyChange = afterMedian - beforeMedian;
 
             html.Append("<p><strong>")
@@ -678,7 +688,8 @@ string? DrawElectricityTimeOfDayAnalysis(
 
             if (finiteDeltas.Length > 0 && beforeMean > 0)
             {
-                var uniform = maxDelta > 0 && minDelta >= maxDelta * 0.6;
+                var uniform = maxDelta > 0 && minDelta >= maxDelta * 0.5;
+                var broad = maxDelta > 0 && medianDelta >= maxDelta * 0.25;
                 html.Append("<p>Comparing the same half hours either side of the step, average load went from ")
                     .Append(Fmt(beforeMean)).Append(" to ").Append(Fmt(afterMean))
                     .Append(" kWh per half hour. ");
@@ -687,11 +698,25 @@ string? DrawElectricityTimeOfDayAnalysis(
                 {
                     html.Append("The rise is present at every time of day: the smallest half-hour increase (")
                         .Append(FmtSigned(minDelta))
-                        .Append(" kWh) is at least 60% of the largest (")
+                        .Append(" kWh) is at least half the largest (")
                         .Append(FmtSigned(maxDelta))
                         .Append(" kWh). That points to an <strong>always-on load</strong> ")
                         .Append("(for example a pump, fridge/freezer, server, immersion heater left on, or a new appliance) ")
                         .Append("rather than something switched on at a particular time.");
+                }
+                else if (broad)
+                {
+                    html.Append("The rise is broad rather than a single window: the median half hour is up ")
+                        .Append(FmtSigned(medianDelta))
+                        .Append(" kWh (")
+                        .Append(Fmt(medianDelta / maxDelta * 100))
+                        .Append("% of the ")
+                        .Append(FmtSigned(maxDelta))
+                        .Append(" kWh peak), and most daytime half hours are higher. The biggest extra load is around <strong>")
+                        .Append(FormatHalfHour(peakColumn)).Append("&ndash;")
+                        .Append(FormatHalfHour(peakColumn + 1))
+                        .Append("</strong>. That pattern fits a load that runs through the day ")
+                        .Append("(heating pump, lighting, occupancy) more than one timed appliance.");
                 }
                 else
                 {
@@ -702,33 +727,46 @@ string? DrawElectricityTimeOfDayAnalysis(
                         .Append(FmtSigned(maxDelta)).Append(" kWh per half hour, against a typical ")
                         .Append(FmtSigned(medianDelta)).Append(" kWh elsewhere). ")
                         .Append("Check what runs in that window: heating/hot water schedule, ")
-                        .Append("EV charging, cooking, tumble dryer or lighting.")
-                        .Append("<br><span class=\"note\">Baseload component: about ")
-                        .Append(Fmt(Math.Max(0, minDelta) * 48))
-                        .Append(" kWh/day is added at every half hour.</span>");
+                        .Append("EV charging, cooking, tumble dryer or lighting.");
+                }
+
+                if (overnightDelta * 48 >= 1.0)
+                {
+                    html.Append(" Overnight (00:00&ndash;06:00) adds about ")
+                        .Append(Fmt(overnightDelta * 48))
+                        .Append(" kWh/day, so part of the rise is a genuine baseload.");
+                }
+                else
+                {
+                    html.Append(" There is little or no increase overnight (00:00&ndash;06:00), so this is not a 24/7 baseload.");
                 }
                 html.Append("</p>");
             }
 
-            var beforeGas = MeanDailyGas(gasConsumption, timeZone, beforeFrom, beforeTo);
-            var afterGas = MeanDailyGas(gasConsumption, timeZone, afterFrom, afterTo);
+            var beforeGas = MedianDailyQuantity(gasConsumption, timeZone, beforeFrom, beforeTo);
+            var afterGas = MedianDailyQuantity(gasConsumption, timeZone, afterFrom, afterTo);
             var beforeTemp = MeanTemperature(tempDict, beforeFrom, beforeTo);
             var afterTemp = MeanTemperature(tempDict, afterFrom, afterTo);
 
             if (!double.IsNaN(beforeGas) && !double.IsNaN(afterGas))
             {
-                html.Append("<p>Gas over the same windows: ")
+                var gasChange = afterGas - beforeGas;
+                html.Append("<p>Median gas use over the same windows: ")
                     .Append(Fmt(beforeGas)).Append(" &rarr; ").Append(Fmt(afterGas))
                     .Append(" m<sup>3</sup>/day");
                 if (beforeGas > 0)
                 {
-                    html.Append(" (").Append(FmtSigned((afterGas - beforeGas) / beforeGas * 100)).Append("%)");
+                    html.Append(" (").Append(FmtSigned(gasChange / beforeGas * 100)).Append("%)");
                 }
-                html.Append(". If gas <em>fell</em> while electricity rose, suspect fuel switching ")
-                    .Append("(an immersion heater or electric heating replacing gas). ");
+                html.Append(gasChange switch
+                {
+                    < -0.1 => ". Gas fell while electricity rose, so suspect fuel switching (an immersion heater or electric heating replacing gas).",
+                    > 0.1 => ". Gas rose at the same time, so the heating season is a confounder.",
+                    _ => ". Gas was roughly unchanged."
+                });
                 if (!double.IsNaN(beforeTemp) && !double.IsNaN(afterTemp))
                 {
-                    html.Append("Average outdoor temperature was ")
+                    html.Append(" Average outdoor temperature was ")
                         .Append(Fmt(beforeTemp)).Append("&deg;C before versus ")
                         .Append(Fmt(afterTemp)).Append("&deg;C after");
                     if (afterTemp < beforeTemp - 1.5)
@@ -736,6 +774,52 @@ string? DrawElectricityTimeOfDayAnalysis(
                         html.Append(", so colder weather is a confounder");
                     }
                     html.Append('.');
+                }
+                html.Append("</p>");
+            }
+
+            // Compare with the same calendar weeks a year earlier. A genuine new load shows up
+            // as an electricity step that the previous year did not have, even if the heating
+            // came on at the same time in both years.
+            var lastYearBeforeFrom = beforeFrom.AddYears(-1);
+            var lastYearBeforeTo = beforeTo.AddYears(-1);
+            var lastYearAfterFrom = afterFrom.AddYears(-1);
+            var lastYearAfterTo = afterTo.AddYears(-1);
+            var lastYearBefore = MedianDailyQuantity(electricConsumption, timeZone, lastYearBeforeFrom, lastYearBeforeTo);
+            var lastYearAfter = MedianDailyQuantity(electricConsumption, timeZone, lastYearAfterFrom, lastYearAfterTo);
+
+            if (!double.IsNaN(lastYearBefore) && !double.IsNaN(lastYearAfter))
+            {
+                var lastYearChange = lastYearAfter - lastYearBefore;
+                html.Append("<p>Same 4-week windows in ")
+                    .Append(lastYearBeforeFrom.Year.ToString(CultureInfo.InvariantCulture))
+                    .Append(": median electricity ")
+                    .Append(Fmt(lastYearBefore)).Append(" &rarr; ").Append(Fmt(lastYearAfter))
+                    .Append(" kWh/day (")
+                    .Append(FmtSigned(lastYearChange)).Append(" kWh/day");
+                if (lastYearBefore > 0)
+                {
+                    html.Append(", ").Append(FmtSigned(lastYearChange / lastYearBefore * 100)).Append('%');
+                }
+                html.Append(')');
+
+                var lastYearBeforeGas = MedianDailyQuantity(gasConsumption, timeZone, lastYearBeforeFrom, lastYearBeforeTo);
+                var lastYearAfterGas = MedianDailyQuantity(gasConsumption, timeZone, lastYearAfterFrom, lastYearAfterTo);
+                if (!double.IsNaN(lastYearBeforeGas) && !double.IsNaN(lastYearAfterGas))
+                {
+                    html.Append(", and gas ")
+                        .Append(Fmt(lastYearBeforeGas)).Append(" &rarr; ").Append(Fmt(lastYearAfterGas))
+                        .Append(" m<sup>3</sup>/day");
+                }
+                html.Append(". ");
+
+                if (dailyChange > 0.5 && lastYearChange >= dailyChange * 0.8)
+                {
+                    html.Append("That is comparable to this year's step, so much of the rise is seasonal.");
+                }
+                else if (dailyChange > 0.5)
+                {
+                    html.Append("Electricity did not step up by a comparable amount then, so this year's rise is beyond the normal seasonal change.");
                 }
                 html.Append("</p>");
             }
@@ -817,29 +901,29 @@ void DrawHalfHourlyHeatmap(double[,] grid, DateTime firstDate, DateTime lastDate
     SavePlotPng(plot, "output/electric-halfhourly-heatmap.png");
 }
 
-void DrawElectricityProfile(double[] before, double[] after)
+void DrawElectricityProfile(double[] before, double[] after, DateTime beforeFrom, DateTime beforeTo, DateTime afterFrom, DateTime afterTo, DateTime changeDate)
 {
     var xs = Enumerable.Range(0, 48).Select(column => column / 2.0 + 0.25).ToArray();
 
     ScottPlot.Plot plot = new();
     var beforeSeries = plot.Add.Scatter(xs, before, ScottPlot.Colors.SteelBlue);
-    beforeSeries.LegendText = "Before the step";
+    beforeSeries.LegendText = $"Before ({ShortDate(beforeFrom)} \u2013 {ShortDate(beforeTo)}, {DayCount(beforeFrom, beforeTo)} days)";
     beforeSeries.MarkerSize = 0;
     beforeSeries.LineWidth = 2;
 
     var afterSeries = plot.Add.Scatter(xs, after, ScottPlot.Colors.IndianRed);
-    afterSeries.LegendText = "After the step";
+    afterSeries.LegendText = $"After ({ShortDate(afterFrom)} \u2013 {ShortDate(afterTo)}, {DayCount(afterFrom, afterTo)} days)";
     afterSeries.MarkerSize = 0;
     afterSeries.LineWidth = 2;
 
-    plot.ShowLegend();
+    plot.ShowLegend(ScottPlot.Alignment.UpperLeft);
     ConfigureTimeOfDayAxis(plot);
     plot.YLabel("Average kWh per half hour");
-    plot.Title("Electricity profile before and after the step");
+    plot.Title($"Electricity profile before and after {changeDate.ToString("d MMM yyyy", CultureInfo.InvariantCulture)}");
     SavePlotPng(plot, "output/electric-profile-before-after.png");
 }
 
-void DrawElectricityProfileChange(double[] before, double[] after)
+void DrawElectricityProfileChange(double[] before, double[] after, DateTime changeDate)
 {
     var xs = Enumerable.Range(0, 48).Select(column => column / 2.0 + 0.25).ToArray();
     var differences = new double[48];
@@ -862,9 +946,13 @@ void DrawElectricityProfileChange(double[] before, double[] after)
     plot.Add.HorizontalLine(0, 1, ScottPlot.Colors.Gray);
     ConfigureTimeOfDayAxis(plot);
     plot.YLabel("Change in average kWh per half hour");
-    plot.Title("Where the increase appears");
+    plot.Title($"Change in electricity use after {changeDate.ToString("d MMM yyyy", CultureInfo.InvariantCulture)}");
     SavePlotPng(plot, "output/electric-profile-change.png");
 }
+
+string ShortDate(DateTime date) => date.ToString("d MMM", CultureInfo.InvariantCulture);
+
+int DayCount(DateTime from, DateTime to) => (to.Date - from.Date).Days + 1;
 
 void ConfigureTimeOfDayAxis(ScottPlot.Plot plot)
 {
@@ -928,9 +1016,9 @@ DateTime? DetectStepDate(Dictionary<DateTime, double> dailyTotals)
     return bestScore >= Math.Max(0.5, bestBefore * 0.05) ? bestDate : null;
 }
 
-double MeanDailyGas(List<Consumption> gasConsumption, TimeZoneInfo timeZone, DateTime from, DateTime to)
+double MedianDailyQuantity(List<Consumption> consumption, TimeZoneInfo timeZone, DateTime from, DateTime to)
 {
-    var values = gasConsumption
+    var values = consumption
         .Where(item =>
         {
             var date = TimeZoneInfo.ConvertTime(item.Start, timeZone).DateTime.Date;
@@ -939,7 +1027,7 @@ double MeanDailyGas(List<Consumption> gasConsumption, TimeZoneInfo timeZone, Dat
         .Select(item => (double)item.Quantity)
         .ToArray();
 
-    return values.Length == 0 ? double.NaN : values.Average();
+    return values.Length == 0 ? double.NaN : Median(values);
 }
 
 double MeanTemperature(Dictionary<string, decimal> tempDict, DateTime from, DateTime to)
