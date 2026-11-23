@@ -136,7 +136,10 @@ async Task GenerateAsync()
             halfHourly,
             halfHourlyFrom,
             toDate,
-            ResolveTimeZone(config["time_zone"]))
+            TryParseDate(config["change_date"]),
+            ResolveTimeZone(config["time_zone"]),
+            gasConsumption,
+            tempDict)
         : null;
 
     DrawGasTempScatterChart(gasConsumption, tempDict);
@@ -531,7 +534,10 @@ string? DrawElectricityTimeOfDayAnalysis(
     List<Consumption> halfHourly,
     DateTime windowFrom,
     DateTime windowTo,
-    TimeZoneInfo timeZone)
+    DateTime? configuredChangeDate,
+    TimeZoneInfo timeZone,
+    List<Consumption> gasConsumption,
+    Dictionary<string, decimal> tempDict)
 {
     // Octopus timestamps are instants, but "time of day" is a local idea. Convert to the
     // configured zone once so the heatmap columns are local wall-clock half hours.
@@ -574,17 +580,187 @@ string? DrawElectricityTimeOfDayAnalysis(
         }
     }
 
-    if (dayCount < 2)
+    if (dayCount >= 2)
     {
-        return null;
+        DrawHalfHourlyHeatmap(grid, firstDate, lastDate);
     }
 
-    DrawHalfHourlyHeatmap(grid, firstDate, lastDate);
+    var dailyTotals = slots
+        .GroupBy(slot => slot.LocalStart.Date)
+        // Ignore partial days (for example the edges of the window or a meter outage)
+        // when looking for a step; a normal day has 46, 48 or 50 half hours.
+        .Where(group => group.Count() >= 40)
+        .ToDictionary(group => group.Key, group => group.Sum(slot => slot.Kwh));
 
-    return """
-        <h2>Electricity time-of-day analysis</h2>
-        <figure><img src="electric-halfhourly-heatmap.png" alt="Electricity use by date and time of day"></figure>
-        """;
+    var changeDate = configuredChangeDate?.Date ?? DetectStepDate(dailyTotals);
+
+    var html = new System.Text.StringBuilder();
+    html.Append("<h2>Electricity time-of-day analysis</h2>");
+
+    if (changeDate is null)
+    {
+        html.Append("<p>No clear upward step was found in the selected window. ")
+            .Append("Set <code>change_date</code> to the date usage jumped, then re-run to compare ")
+            .Append("the half-hourly profile either side of it.</p>");
+    }
+    else
+    {
+        var beforeTo = changeDate.Value.AddDays(-1);
+        var beforeFrom = beforeTo.AddDays(-27);
+        var afterFrom = changeDate.Value;
+        var afterTo = afterFrom.AddDays(27);
+        if (beforeFrom < firstDate) beforeFrom = firstDate;
+        if (afterTo > lastDate) afterTo = lastDate;
+
+        var beforeDays = (beforeTo - beforeFrom).Days + 1;
+        var afterDays = (afterTo - afterFrom).Days + 1;
+
+        if (beforeDays >= 7 && afterDays >= 7)
+        {
+            var before = BuildHalfHourProfile(slots, beforeFrom, beforeTo);
+            var after = BuildHalfHourProfile(slots, afterFrom, afterTo);
+            DrawElectricityProfile(before, after);
+            DrawElectricityProfileChange(before, after);
+
+            var beforeMean = MeanOfFinite(before);
+            var afterMean = MeanOfFinite(after);
+            var deltas = new double[48];
+            for (var column = 0; column < 48; column++)
+            {
+                deltas[column] = double.IsNaN(before[column]) || double.IsNaN(after[column])
+                    ? double.NaN
+                    : after[column] - before[column];
+            }
+
+            var finiteDeltas = deltas.Where(delta => !double.IsNaN(delta)).ToArray();
+            var medianDelta = finiteDeltas.Length == 0 ? 0 : Median(finiteDeltas);
+            var minDelta = finiteDeltas.Length == 0 ? 0 : finiteDeltas.Min();
+            var maxDelta = finiteDeltas.Length == 0 ? 0 : finiteDeltas.Max();
+            var peakColumn = Array.FindIndex(deltas, delta => !double.IsNaN(delta));
+            if (peakColumn < 0)
+            {
+                peakColumn = 0;
+            }
+
+            for (var column = peakColumn + 1; column < 48; column++)
+            {
+                if (!double.IsNaN(deltas[column]) && deltas[column] > deltas[peakColumn])
+                {
+                    peakColumn = column;
+                }
+            }
+
+            var beforeMedian = Median(dailyTotals
+                .Where(pair => pair.Key >= beforeFrom && pair.Key <= beforeTo)
+                .Select(pair => pair.Value)
+                .ToArray());
+            var afterMedian = Median(dailyTotals
+                .Where(pair => pair.Key >= afterFrom && pair.Key <= afterTo)
+                .Select(pair => pair.Value)
+                .ToArray());
+            var dailyChange = afterMedian - beforeMedian;
+
+            html.Append("<p><strong>")
+                .Append(configuredChangeDate is not null ? "Comparing around " : "Largest step found: ")
+                .Append(changeDate.Value.ToString("d MMM yyyy", CultureInfo.InvariantCulture))
+                .Append(".</strong> Median daily use was ")
+                .Append(Fmt(beforeMedian))
+                .Append(" kWh/day in the 4 weeks before and ")
+                .Append(Fmt(afterMedian))
+                .Append(" kWh/day in the 4 weeks after (")
+                .Append(FmtSigned(dailyChange))
+                .Append(" kWh/day");
+            if (beforeMedian > 0)
+            {
+                html.Append(", ").Append(FmtSigned(dailyChange / beforeMedian * 100)).Append('%');
+            }
+            html.Append(").</p>");
+
+            if (finiteDeltas.Length > 0 && beforeMean > 0)
+            {
+                var uniform = maxDelta > 0 && minDelta >= maxDelta * 0.6;
+                html.Append("<p>Comparing the same half hours either side of the step, average load went from ")
+                    .Append(Fmt(beforeMean)).Append(" to ").Append(Fmt(afterMean))
+                    .Append(" kWh per half hour. ");
+
+                if (uniform)
+                {
+                    html.Append("The rise is present at every time of day: the smallest half-hour increase (")
+                        .Append(FmtSigned(minDelta))
+                        .Append(" kWh) is at least 60% of the largest (")
+                        .Append(FmtSigned(maxDelta))
+                        .Append(" kWh). That points to an <strong>always-on load</strong> ")
+                        .Append("(for example a pump, fridge/freezer, server, immersion heater left on, or a new appliance) ")
+                        .Append("rather than something switched on at a particular time.");
+                }
+                else
+                {
+                    html.Append("The rise is concentrated around <strong>")
+                        .Append(FormatHalfHour(peakColumn)).Append("&ndash;")
+                        .Append(FormatHalfHour(peakColumn + 1))
+                        .Append("</strong> (")
+                        .Append(FmtSigned(maxDelta)).Append(" kWh per half hour, against a typical ")
+                        .Append(FmtSigned(medianDelta)).Append(" kWh elsewhere). ")
+                        .Append("Check what runs in that window: heating/hot water schedule, ")
+                        .Append("EV charging, cooking, tumble dryer or lighting.")
+                        .Append("<br><span class=\"note\">Baseload component: about ")
+                        .Append(Fmt(Math.Max(0, minDelta) * 48))
+                        .Append(" kWh/day is added at every half hour.</span>");
+                }
+                html.Append("</p>");
+            }
+
+            var beforeGas = MeanDailyGas(gasConsumption, timeZone, beforeFrom, beforeTo);
+            var afterGas = MeanDailyGas(gasConsumption, timeZone, afterFrom, afterTo);
+            var beforeTemp = MeanTemperature(tempDict, beforeFrom, beforeTo);
+            var afterTemp = MeanTemperature(tempDict, afterFrom, afterTo);
+
+            if (!double.IsNaN(beforeGas) && !double.IsNaN(afterGas))
+            {
+                html.Append("<p>Gas over the same windows: ")
+                    .Append(Fmt(beforeGas)).Append(" &rarr; ").Append(Fmt(afterGas))
+                    .Append(" m<sup>3</sup>/day");
+                if (beforeGas > 0)
+                {
+                    html.Append(" (").Append(FmtSigned((afterGas - beforeGas) / beforeGas * 100)).Append("%)");
+                }
+                html.Append(". If gas <em>fell</em> while electricity rose, suspect fuel switching ")
+                    .Append("(an immersion heater or electric heating replacing gas). ");
+                if (!double.IsNaN(beforeTemp) && !double.IsNaN(afterTemp))
+                {
+                    html.Append("Average outdoor temperature was ")
+                        .Append(Fmt(beforeTemp)).Append("&deg;C before versus ")
+                        .Append(Fmt(afterTemp)).Append("&deg;C after");
+                    if (afterTemp < beforeTemp - 1.5)
+                    {
+                        html.Append(", so colder weather is a confounder");
+                    }
+                    html.Append('.');
+                }
+                html.Append("</p>");
+            }
+
+            html.Append("<p class=\"note\">This compares calendar windows, so normal seasonal change is included. ")
+                .Append("The heatmap shows the timing pattern directly; set <code>change_date</code> ")
+                .Append("to override the automatically detected date.</p>");
+        }
+        else
+        {
+            html.Append("<p>The step date (")
+                .Append(changeDate.Value.ToString("d MMM yyyy", CultureInfo.InvariantCulture))
+                .Append(") is too close to the edge of the data for a before/after comparison. ")
+                .Append("Extend <code>half_hourly_from</code> and re-run.</p>");
+        }
+    }
+
+    html.Append("<figure><img src=\"electric-halfhourly-heatmap.png\" alt=\"Electricity use by date and time of day\"></figure>");
+    if (changeDate is not null)
+    {
+        html.Append("<figure><img src=\"electric-profile-before-after.png\" alt=\"Electricity profile before and after the step\"></figure>");
+        html.Append("<figure><img src=\"electric-profile-change.png\" alt=\"Change in electricity use by time of day\"></figure>");
+    }
+
+    return html.ToString();
 }
 
 void DrawHalfHourlyHeatmap(double[,] grid, DateTime firstDate, DateTime lastDate)
@@ -641,6 +817,165 @@ void DrawHalfHourlyHeatmap(double[,] grid, DateTime firstDate, DateTime lastDate
     SavePlotPng(plot, "output/electric-halfhourly-heatmap.png");
 }
 
+void DrawElectricityProfile(double[] before, double[] after)
+{
+    var xs = Enumerable.Range(0, 48).Select(column => column / 2.0 + 0.25).ToArray();
+
+    ScottPlot.Plot plot = new();
+    var beforeSeries = plot.Add.Scatter(xs, before, ScottPlot.Colors.SteelBlue);
+    beforeSeries.LegendText = "Before the step";
+    beforeSeries.MarkerSize = 0;
+    beforeSeries.LineWidth = 2;
+
+    var afterSeries = plot.Add.Scatter(xs, after, ScottPlot.Colors.IndianRed);
+    afterSeries.LegendText = "After the step";
+    afterSeries.MarkerSize = 0;
+    afterSeries.LineWidth = 2;
+
+    plot.ShowLegend();
+    ConfigureTimeOfDayAxis(plot);
+    plot.YLabel("Average kWh per half hour");
+    plot.Title("Electricity profile before and after the step");
+    SavePlotPng(plot, "output/electric-profile-before-after.png");
+}
+
+void DrawElectricityProfileChange(double[] before, double[] after)
+{
+    var xs = Enumerable.Range(0, 48).Select(column => column / 2.0 + 0.25).ToArray();
+    var differences = new double[48];
+    for (var column = 0; column < 48; column++)
+    {
+        differences[column] = double.IsNaN(before[column]) || double.IsNaN(after[column])
+            ? double.NaN
+            : after[column] - before[column];
+    }
+
+    ScottPlot.Plot plot = new();
+    var bars = plot.Add.Bars(xs, differences);
+    foreach (var bar in bars.Bars)
+    {
+        bar.Size = 0.45;
+        bar.LineWidth = 0;
+        bar.FillColor = bar.Value >= 0 ? ScottPlot.Colors.IndianRed : ScottPlot.Colors.SteelBlue;
+    }
+
+    plot.Add.HorizontalLine(0, 1, ScottPlot.Colors.Gray);
+    ConfigureTimeOfDayAxis(plot);
+    plot.YLabel("Change in average kWh per half hour");
+    plot.Title("Where the increase appears");
+    SavePlotPng(plot, "output/electric-profile-change.png");
+}
+
+void ConfigureTimeOfDayAxis(ScottPlot.Plot plot)
+{
+    plot.Axes.Bottom.TickGenerator = new ScottPlot.TickGenerators.NumericManual(
+        new double[] { 0, 3, 6, 9, 12, 15, 18, 21, 24 },
+        new[] { "00:00", "03:00", "06:00", "09:00", "12:00", "15:00", "18:00", "21:00", "24:00" });
+    plot.XLabel("Time of day");
+}
+
+double[] BuildHalfHourProfile(List<HalfHourSlot> slots, DateTime from, DateTime to)
+{
+    var sums = new double[48];
+    var counts = new int[48];
+    foreach (var slot in slots)
+    {
+        if (slot.LocalStart.Date < from.Date || slot.LocalStart.Date > to.Date)
+        {
+            continue;
+        }
+
+        var column = HalfHourColumn(slot.LocalStart);
+        sums[column] += slot.Kwh;
+        counts[column]++;
+    }
+
+    var means = new double[48];
+    for (var column = 0; column < 48; column++)
+    {
+        means[column] = counts[column] == 0 ? double.NaN : sums[column] / counts[column];
+    }
+
+    return means;
+}
+
+DateTime? DetectStepDate(Dictionary<DateTime, double> dailyTotals)
+{
+    const int window = 14;
+    var days = dailyTotals.OrderBy(pair => pair.Key).ToArray();
+    if (days.Length < window * 2)
+    {
+        return null;
+    }
+
+    var bestScore = double.NegativeInfinity;
+    var bestBefore = 0.0;
+    DateTime? bestDate = null;
+    for (var index = window; index <= days.Length - window; index++)
+    {
+        var before = Median(days.Skip(index - window).Take(window).Select(pair => pair.Value).ToArray());
+        var after = Median(days.Skip(index).Take(window).Select(pair => pair.Value).ToArray());
+        var score = after - before;
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestBefore = before;
+            bestDate = days[index].Key;
+        }
+    }
+
+    // Ignore tiny wobbles: require at least 0.5 kWh/day and 5% of the baseline.
+    return bestScore >= Math.Max(0.5, bestBefore * 0.05) ? bestDate : null;
+}
+
+double MeanDailyGas(List<Consumption> gasConsumption, TimeZoneInfo timeZone, DateTime from, DateTime to)
+{
+    var values = gasConsumption
+        .Where(item =>
+        {
+            var date = TimeZoneInfo.ConvertTime(item.Start, timeZone).DateTime.Date;
+            return date >= from.Date && date <= to.Date;
+        })
+        .Select(item => (double)item.Quantity)
+        .ToArray();
+
+    return values.Length == 0 ? double.NaN : values.Average();
+}
+
+double MeanTemperature(Dictionary<string, decimal> tempDict, DateTime from, DateTime to)
+{
+    var values = new List<double>();
+    for (var date = from.Date; date <= to.Date; date = date.AddDays(1))
+    {
+        if (tempDict.TryGetValue(date.ToString("yyyy-MM-dd"), out var temperature))
+        {
+            values.Add((double)temperature);
+        }
+    }
+
+    return values.Count == 0 ? double.NaN : values.Average();
+}
+
+double Median(double[] values)
+{
+    if (values.Length == 0)
+    {
+        return double.NaN;
+    }
+
+    Array.Sort(values);
+    var middle = values.Length / 2;
+    return values.Length % 2 == 1
+        ? values[middle]
+        : (values[middle - 1] + values[middle]) / 2;
+}
+
+double MeanOfFinite(double[] values)
+{
+    var finite = values.Where(value => !double.IsNaN(value)).ToArray();
+    return finite.Length == 0 ? double.NaN : finite.Average();
+}
+
 double Percentile(List<double> sorted, double fraction)
 {
     if (sorted.Count == 0)
@@ -657,6 +992,20 @@ double Percentile(List<double> sorted, double fraction)
 }
 
 int HalfHourColumn(DateTime localTime) => localTime.Hour * 2 + (localTime.Minute >= 30 ? 1 : 0);
+
+string FormatHalfHour(int column)
+{
+    var start = TimeSpan.FromMinutes((column % 48) * 30);
+    return $"{start.Hours:00}:{start.Minutes:00}";
+}
+
+string Fmt(double value) => value.ToString(
+    Math.Abs(value) < 1 ? "0.00" : "0.0",
+    CultureInfo.InvariantCulture);
+
+string FmtSigned(double value) => value.ToString(
+    Math.Abs(value) < 1 ? "+0.00;-0.00;0.00" : "+0.0;-0.0;0.0",
+    CultureInfo.InvariantCulture);
 
 TimeZoneInfo ResolveTimeZone(string? id)
 {
