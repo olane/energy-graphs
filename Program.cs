@@ -144,12 +144,14 @@ async Task GenerateAsync()
         : null;
 
     DrawGasTempScatterChart(gasConsumption, tempDict);
+    DrawElectricityTempScatterChart(electricConsumption, tempDict);
     DrawElectricityDaylightScatterChart(electricConsumption, daylightDict);
 
     var electricLookup = electricConsumption.ToDictionary(x => x.Start.ToString("yyyy-MM-dd"), x => x.Quantity);
     if (consumptionStarts.Count > 0)
     {
         DrawTempScatterWithPeriods(gasConsumption, tempDict, splitDates, day => (double)day.Quantity, "Consumption (m^3)", "Gas usage vs temperature", "output/gas-temp-scatter-split.png");
+        DrawTempScatterWithPeriods(electricConsumption, tempDict, splitDates, day => (double)day.Quantity, "Consumption (kWh)", "Electricity usage vs temperature", "output/electric-temp-scatter-split.png");
         DrawTempScatterWithPeriods(gasConsumption, tempDict, splitDates, day => TotalKwh(day, electricLookup), "Consumption (kWh)", "Total energy usage vs temperature", "output/total-energy-temp-scatter-split.png");
     }
 
@@ -200,6 +202,7 @@ void WriteIndexHtml(bool includeSplit, string? timeOfDaySection)
     var splitFigures = includeSplit
         ? """
         <figure><img src="gas-temp-scatter-split.png" alt="Gas usage vs temperature (split)"></figure>
+        <figure><img src="electric-temp-scatter-split.png" alt="Electricity usage vs temperature (split)"></figure>
         <figure><img src="total-energy-temp-scatter-split.png" alt="Total energy usage vs temperature (split)"></figure>
         """
         : "";
@@ -226,6 +229,7 @@ void WriteIndexHtml(bool includeSplit, string? timeOfDaySection)
         <figure><img src="electric-usage.png" alt="Electricity usage"></figure>
         {{timeOfDayHtml}}
         <figure><img src="gas-temp-scatter.png" alt="Gas usage vs temperature"></figure>
+        <figure><img src="electric-temp-scatter.png" alt="Electricity usage vs temperature"></figure>
         {{splitFigures}}
         <figure><img src="total-energy-temp-scatter.png" alt="Total energy usage vs temperature"></figure>
         <figure><img src="electric-daylight-scatter.png" alt="Electricity usage vs daylight hours"></figure>
@@ -336,6 +340,31 @@ void DrawGasTempScatterChart(List<Consumption> gasConsumption, Dictionary<string
     gasPlot.YLabel("Consumption (m^3)");
     gasPlot.Title("Gas usage vs temperature");
     SavePlotPng(gasPlot, "output/gas-temp-scatter.png");
+}
+
+void DrawElectricityTempScatterChart(List<Consumption> electricConsumption, Dictionary<string, decimal> tempDict)
+{
+    var xs = new List<decimal>();
+    var ys = new List<decimal>();
+
+    foreach (var electricDay in electricConsumption)
+    {
+        if (!tempDict.TryGetValue(electricDay.Start.ToString("yyyy-MM-dd"), out var temp))
+        {
+            continue;
+        }
+
+        xs.Add(temp);
+        ys.Add(electricDay.Quantity);
+    }
+
+    ScottPlot.Plot plot = new();
+    plot.Add.ScatterPoints(xs, ys);
+
+    plot.XLabel("Daily temperature average (deg C)");
+    plot.YLabel("Consumption (kWh)");
+    plot.Title("Electricity usage vs temperature");
+    SavePlotPng(plot, "output/electric-temp-scatter.png");
 }
 
 void DrawTempScatterWithPeriods(List<Consumption> gasConsumption, Dictionary<string, decimal> tempDict, List<DateTime> splitDates, Func<Consumption, double?> value, string yLabel, string title, string outputPath)
