@@ -9,7 +9,7 @@ RUN dotnet publish energy-graphs.csproj -c Release -o /app/publish /p:UseAppHost
 
 FROM mcr.microsoft.com/dotnet/aspnet:8.0-bookworm-slim AS final
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libfontconfig1 \
+    && apt-get install -y --no-install-recommends libfontconfig1 fonts-dejavu-core tzdata \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY --from=build /app/publish ./
