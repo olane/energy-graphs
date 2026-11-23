@@ -63,6 +63,9 @@ The date range defaults to **all time**: `from_date` comes from the discovered p
 | `from_date` | property move-in date (or open-ended) | First day to fetch (`yyyy-MM-dd`) |
 | `to_date` | today (UTC) | Last day to fetch (`yyyy-MM-dd`) |
 | `split_dates` | one split per calendar year | Comma-separated `yyyy-MM-dd` split points for the `*-split.png` graphs (one colour per period, with a legend). When unset the periods default to calendar-year boundaries, so each year gets its own colour. Applied to both the gas and total-energy scatter graphs. `split_date` is accepted as an alias for a single split. |
+| `half_hourly_from` | 179 days before `to_date` (clamped to `from_date`) | First day of the half-hourly electricity window used for the time-of-day analysis. |
+| `change_date` | auto-detected | Date to compare the before/after half-hourly profiles around. Set this (`yyyy-MM-dd`) if the detected step is wrong. |
+| `time_zone` | `Europe/London` | IANA time zone used to bucket half-hourly readings into local dates and times of day. |
 | `cache_dir` | `cache` | Weather cache directory |
 | `refresh_hours` | `24` | Hours between automatic graph regenerations. Set to `0` to generate only once at startup. |
 
@@ -81,6 +84,48 @@ Graphs produced in `output/`:
 | `total-energy-temp-scatter.png` | Gas + electricity (kWh) vs temperature |
 | `total-energy-temp-scatter-split.png` | Gas + electricity (kWh) vs temperature, one colour per period with a dashed trend line per period, fitted to days at or below 16 °C and excluding the Christmas break |
 | `electric-daylight-scatter.png` | Electricity usage vs daylight hours (from weather sunrise/sunset) |
+| `electric-halfhourly-heatmap.png` | Electricity use by date and half hour (see below) |
+| `electric-profile-before-after.png` | Average half-hourly profile before vs after the step change |
+| `electric-profile-change.png` | Increase per half hour after the step, to show whether it is baseload or time-specific |
+
+## Investigating a step change in electricity use
+
+The time-of-day analysis fetches half-hourly electricity for the recent window and compares
+the shape of the day before and after a step change. It is meant to distinguish:
+
+- **an always-on load** (a pump, fridge/freezer, server, immersion heater left on, a new
+  appliance): the increase appears at every half hour, and the per-half-hour change chart is
+  roughly flat;
+- **a time-specific load** (heating/hot water schedule, EV charging, cooking, tumble dryer,
+  lighting): the change is concentrated in a particular part of the day.
+
+The generated `index.html` also prints a short text summary: the detected step date, the
+median daily change, whether the increase is uniform, and how gas and outdoor temperature
+changed over the same windows.
+
+How to read the result:
+
+1. **Heatmap** — each row is a local day and each column is a local half hour. Look for the
+   date the colour gets brighter. If the whole row brightens, it is a step across the day; if
+   only some columns brighten, the cause is time-specific.
+2. **Before/after profile** — the average day either side of the step. A parallel shift means
+   baseload; a wider gap in one hump means a timed appliance.
+3. **Change-by-half-hour** — the delta directly. A flat bar across the day is the signature of
+   something that switched on and stayed on.
+4. **Gas and temperature** — if gas fell while electricity rose, suspect fuel switching (for
+   example an immersion heater or electric heating replacing gas). If both gas and temperature
+   moved a lot, the comparison is partly seasonal; extend `half_hourly_from` and set
+   `change_date` to compare like-for-like weeks.
+
+Common causes worth checking once the timing is known: a new always-on appliance or pump, an
+immersion heater or underfloor heating left on, EV charging, a dehumidifier, a tariff/meter
+change (including estimated readings), and the clocks changing (a local day has 46 or 50 half
+hours on the DST transition days; the analysis averages duplicate half hours and leaves the
+missing one as a gap).
+
+`change_date` overrides the automatically detected date. The detector looks for the largest
+sustained rise in the 14-day median either side of a candidate day, so a holiday return or a
+cold snap can occasionally be picked instead of a genuine appliance change.
 
 ### Prebuilt image
 
