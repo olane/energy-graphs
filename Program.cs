@@ -77,6 +77,32 @@ async Task GenerateAsync()
     // For SMETS1 gas is kwh equivalent, for SMETS2 it is in m^3
     var gasConsumption = await FetchConsumption(gasMeters, (mprn, serial) => octopusClient.GetGasConsumptionAsync(mprn, serial, from, to, Interval.Day));
 
+    // Half-hourly electricity is only needed for the time-of-day analysis. It is a much
+    // bigger download than the daily series, so keep it to a recent window. The extra
+    // day either side covers local-time boundaries and daylight-saving changes.
+    var halfHourlyFrom = (TryParseDate(config["half_hourly_from"]) ?? toDate.AddDays(-179)).Date;
+    if (halfHourlyFrom < fromDate.Date) halfHourlyFrom = fromDate.Date;
+    if (halfHourlyFrom > toDate) halfHourlyFrom = toDate.AddDays(-1);
+    var halfHourly = new List<Consumption>();
+    if (electricityMeters.Count > 0)
+    {
+        try
+        {
+            halfHourly = await FetchConsumption(electricityMeters, (mpan, serial) => octopusClient.GetElectricityConsumptionAsync(
+                mpan,
+                serial,
+                new DateTimeOffset(halfHourlyFrom.AddDays(-1), TimeSpan.Zero),
+                new DateTimeOffset(toDate.AddDays(2), TimeSpan.Zero).AddTicks(-1),
+                Interval.HalfHour));
+        }
+        catch (Exception ex)
+        {
+            // The daily graphs are the core feature; don't let an unavailable half-hourly
+            // feed (or a rate limit) stop them being generated.
+            Console.Error.WriteLine($"Half-hourly electricity fetch failed: {ex.Message}");
+        }
+    }
+
     Directory.CreateDirectory("output");
     DrawGasUsage(gasConsumption);
     DrawElectricityUsage(electricConsumption);
@@ -102,6 +128,17 @@ async Task GenerateAsync()
     var daylightDict = weather
         .Where(x => x.SunriseEpoch > 0 && x.SunsetEpoch > 0)
         .ToDictionary(x => x.DateTime, x => (decimal)(x.SunsetEpoch - x.SunriseEpoch) / 3600m);
+
+    // Compare the shape of a day (not just daily totals) around the step change. The
+    // heatmap shows the whole window so the exact date and time of day are visible.
+    var timeOfDaySection = halfHourly.Count > 0
+        ? DrawElectricityTimeOfDayAnalysis(
+            halfHourly,
+            halfHourlyFrom,
+            toDate,
+            ResolveTimeZone(config["time_zone"]))
+        : null;
+
     DrawGasTempScatterChart(gasConsumption, tempDict);
     DrawElectricityDaylightScatterChart(electricConsumption, daylightDict);
 
@@ -113,7 +150,7 @@ async Task GenerateAsync()
     }
 
     DrawGasPlusElectricityTempScatterChart(gasConsumption, electricConsumption, tempDict);
-    WriteIndexHtml(consumptionStarts.Count > 0);
+    WriteIndexHtml(consumptionStarts.Count > 0, timeOfDaySection);
 }
 
 var app = builder.Build();
@@ -154,7 +191,7 @@ if (refreshHours > 0)
 
 app.Run();
 
-void WriteIndexHtml(bool includeSplit)
+void WriteIndexHtml(bool includeSplit, string? timeOfDaySection)
 {
     var splitFigures = includeSplit
         ? """
@@ -162,6 +199,8 @@ void WriteIndexHtml(bool includeSplit)
         <figure><img src="total-energy-temp-scatter-split.png" alt="Total energy usage vs temperature (split)"></figure>
         """
         : "";
+
+    var timeOfDayHtml = timeOfDaySection ?? "";
 
     var html = $$"""
         <!doctype html>
@@ -174,12 +213,14 @@ void WriteIndexHtml(bool includeSplit)
         body { font-family: system-ui, sans-serif; margin: 0 auto; max-width: 1200px; padding: 1rem; }
         img { max-width: 100%; height: auto; }
         figure { margin: 0 0 2rem; }
+        .note { color: #555; }
         </style>
         </head>
         <body>
         <h1>Energy usage</h1>
         <figure><img src="gas-usage.png" alt="Gas usage"></figure>
         <figure><img src="electric-usage.png" alt="Electricity usage"></figure>
+        {{timeOfDayHtml}}
         <figure><img src="gas-temp-scatter.png" alt="Gas usage vs temperature"></figure>
         {{splitFigures}}
         <figure><img src="total-energy-temp-scatter.png" alt="Total energy usage vs temperature"></figure>
@@ -486,6 +527,162 @@ void DrawElectricityUsage(List<Consumption> electricConsumption)
     SavePlotPng(leccyPlot, "output/electric-usage.png");
 }
 
+string? DrawElectricityTimeOfDayAnalysis(
+    List<Consumption> halfHourly,
+    DateTime windowFrom,
+    DateTime windowTo,
+    TimeZoneInfo timeZone)
+{
+    // Octopus timestamps are instants, but "time of day" is a local idea. Convert to the
+    // configured zone once so the heatmap columns are local wall-clock half hours.
+    var slots = halfHourly
+        .Select(item => new HalfHourSlot(
+            TimeZoneInfo.ConvertTime(item.Start, timeZone).DateTime,
+            (double)item.Quantity))
+        .Where(slot => slot.LocalStart.Date >= windowFrom.Date && slot.LocalStart.Date <= windowTo.Date)
+        .OrderBy(slot => slot.LocalStart)
+        .ToList();
+
+    if (slots.Count == 0)
+    {
+        return null;
+    }
+
+    var firstDate = slots.Min(slot => slot.LocalStart.Date);
+    var lastDate = slots.Max(slot => slot.LocalStart.Date);
+    var dayCount = (lastDate - firstDate).Days + 1;
+
+    // Date x half-hour grid. Days with no reading stay NaN so they render as gaps.
+    var sums = new double[dayCount, 48];
+    var counts = new int[dayCount, 48];
+    foreach (var slot in slots)
+    {
+        var row = (slot.LocalStart.Date - firstDate).Days;
+        var column = HalfHourColumn(slot.LocalStart);
+        sums[row, column] += slot.Kwh;
+        counts[row, column]++;
+    }
+
+    var grid = new double[dayCount, 48];
+    for (var row = 0; row < dayCount; row++)
+    {
+        for (var column = 0; column < 48; column++)
+        {
+            grid[row, column] = counts[row, column] == 0
+                ? double.NaN
+                : sums[row, column] / counts[row, column];
+        }
+    }
+
+    if (dayCount < 2)
+    {
+        return null;
+    }
+
+    DrawHalfHourlyHeatmap(grid, firstDate, lastDate);
+
+    return """
+        <h2>Electricity time-of-day analysis</h2>
+        <figure><img src="electric-halfhourly-heatmap.png" alt="Electricity use by date and time of day"></figure>
+        """;
+}
+
+void DrawHalfHourlyHeatmap(double[,] grid, DateTime firstDate, DateTime lastDate)
+{
+    ScottPlot.Plot plot = new();
+    var heatmap = plot.Add.Heatmap(grid);
+    heatmap.FlipVertically = true;
+    heatmap.Smooth = false;
+    heatmap.Colormap = new ScottPlot.Colormaps.Viridis();
+
+    // Cell centres sit on half-hour marks; the heatmap adds half a cell at the edges.
+    heatmap.Extent = new ScottPlot.CoordinateRect(
+        0.25,
+        23.75,
+        firstDate.ToOADate(),
+        lastDate.ToOADate());
+
+    var finite = new List<double>();
+    for (var row = 0; row < grid.GetLength(0); row++)
+    {
+        for (var column = 0; column < grid.GetLength(1); column++)
+        {
+            if (!double.IsNaN(grid[row, column]))
+            {
+                finite.Add(grid[row, column]);
+            }
+        }
+    }
+
+    if (finite.Count > 0)
+    {
+        finite.Sort();
+        // Clip the colour scale to the 98th percentile so a few winter peaks do not
+        // wash out the rest of the year.
+        heatmap.ManualRange = new ScottPlot.Range(0, Math.Max(0.01, Percentile(finite, 0.98)));
+    }
+
+    plot.Add.ColorBar(heatmap);
+    plot.Axes.Left.TickGenerator = new ScottPlot.TickGenerators.DateTimeAutomatic
+    {
+        LabelFormatter = date => date.ToString("d MMM", CultureInfo.InvariantCulture)
+    };
+    plot.Axes.Bottom.TickGenerator = new ScottPlot.TickGenerators.NumericManual(
+        new double[] { 0, 3, 6, 9, 12, 15, 18, 21, 24 },
+        new[] { "00:00", "03:00", "06:00", "09:00", "12:00", "15:00", "18:00", "21:00", "24:00" });
+
+    // The heatmap's drawn area is half a cell beyond the extent, so match it exactly
+    // to avoid a band of empty space at the edges.
+    plot.Axes.SetLimits(0, 24, firstDate.ToOADate() - 0.5, lastDate.ToOADate() + 0.5);
+
+    plot.XLabel("Time of day");
+    plot.YLabel("Date");
+    plot.Title("Electricity use by date and time of day");
+    SavePlotPng(plot, "output/electric-halfhourly-heatmap.png");
+}
+
+double Percentile(List<double> sorted, double fraction)
+{
+    if (sorted.Count == 0)
+    {
+        return 0;
+    }
+
+    var index = (sorted.Count - 1) * fraction;
+    var lower = (int)Math.Floor(index);
+    var upper = (int)Math.Ceiling(index);
+    return lower == upper
+        ? sorted[lower]
+        : sorted[lower] + (sorted[upper] - sorted[lower]) * (index - lower);
+}
+
+int HalfHourColumn(DateTime localTime) => localTime.Hour * 2 + (localTime.Minute >= 30 ? 1 : 0);
+
+TimeZoneInfo ResolveTimeZone(string? id)
+{
+    if (!string.IsNullOrWhiteSpace(id))
+    {
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById(id);
+        }
+        catch (TimeZoneNotFoundException)
+        {
+            Console.Error.WriteLine($"Unknown time_zone '{id}'; falling back to Europe/London.");
+        }
+    }
+
+    try
+    {
+        return TimeZoneInfo.FindSystemTimeZoneById("Europe/London");
+    }
+    catch (TimeZoneNotFoundException)
+    {
+        Console.Error.WriteLine("Europe/London time zone not found; using UTC.");
+        return TimeZoneInfo.Utc;
+    }
+}
+
 void ConfigureDateAxis(ScottPlot.Plot plot)
 {
     plot.Axes.DateTimeTicksBottom();
@@ -607,6 +804,8 @@ string CreateMD5(string input)
         return Convert.ToHexString(hashBytes);
     }
 }
+
+public record HalfHourSlot(DateTime LocalStart, double Kwh);
 
 public class WeatherResponse {
     public List<WeatherDay> Days {get; set;}
