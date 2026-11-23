@@ -81,6 +81,8 @@ Graphs produced in `output/`:
 | `electric-usage.png` | Electricity consumption over time |
 | `gas-temp-scatter.png` | Gas usage vs daily average temperature |
 | `gas-temp-scatter-split.png` | Gas usage vs temperature, one colour per period (see `split_dates`) with a dashed trend line per period, fitted to days at or below 16 °C and excluding the Christmas break |
+| `electric-temp-scatter.png` | Electricity usage vs daily average temperature |
+| `electric-temp-scatter-split.png` | Electricity usage vs temperature, one colour per period with a dashed trend line per period, fitted to days at or below 16 °C and excluding the Christmas break |
 | `total-energy-temp-scatter.png` | Gas + electricity (kWh) vs temperature |
 | `total-energy-temp-scatter-split.png` | Gas + electricity (kWh) vs temperature, one colour per period with a dashed trend line per period, fitted to days at or below 16 °C and excluding the Christmas break |
 | `electric-daylight-scatter.png` | Electricity usage vs daylight hours (from weather sunrise/sunset) |
@@ -119,6 +121,9 @@ How to read the result:
    `change_date` to compare like-for-like weeks.
 5. **Same weeks last year** — if electricity did not step up by a comparable amount then, the
    rise is beyond the normal seasonal change. If it did, the step is mostly seasonal.
+
+`electric-temp-scatter-split.png` is the clearest visual check: if this year's points sit above
+last year's trend line at the same temperature, the load has genuinely increased.
 
 Common causes worth checking once the timing is known: a new always-on appliance or pump, an
 immersion heater or underfloor heating left on, EV charging, a dehumidifier, a tariff/meter
