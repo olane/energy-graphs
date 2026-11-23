@@ -100,8 +100,9 @@ the shape of the day before and after a step change. It is meant to distinguish:
   lighting): the change is concentrated in a particular part of the day.
 
 The generated `index.html` also prints a short text summary: the detected step date, the
-median daily change, whether the increase is uniform, and how gas and outdoor temperature
-changed over the same windows.
+median daily change, whether the increase is broad or concentrated, and how gas and outdoor
+temperature changed over the same windows. It also compares the same calendar weeks a year
+earlier, so a genuine new load can be told apart from the normal autumn heating step.
 
 How to read the result:
 
@@ -116,6 +117,8 @@ How to read the result:
    example an immersion heater or electric heating replacing gas). If both gas and temperature
    moved a lot, the comparison is partly seasonal; extend `half_hourly_from` and set
    `change_date` to compare like-for-like weeks.
+5. **Same weeks last year** — if electricity did not step up by a comparable amount then, the
+   rise is beyond the normal seasonal change. If it did, the step is mostly seasonal.
 
 Common causes worth checking once the timing is known: a new always-on appliance or pump, an
 immersion heater or underfloor heating left on, EV charging, a dehumidifier, a tariff/meter
